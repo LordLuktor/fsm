@@ -1,0 +1,264 @@
+version: '3.8'
+
+# =============================================================================
+# FSM - Field Service Management System
+# Docker Swarm Stack
+# =============================================================================
+# Architecture:
+# - WordPress (headless) at fsm-api.steinmetz.ltd
+# - React frontend at fsm.steinmetz.ltd
+# - MariaDB for database
+# - Redis for object caching
+# - Integrates with existing Mumble server at mumble.steinmetz.ltd
+# =============================================================================
+
+services:
+  # ---------------------------------------------------------------------------
+  # MariaDB Database
+  # ---------------------------------------------------------------------------
+  db:
+    image: mariadb:11
+    volumes:
+      - db_data:/var/lib/mysql
+      - ./database/init.sql:/docker-entrypoint-initdb.d/init.sql:ro
+    environment:
+      MYSQL_ROOT_PASSWORD_FILE: /run/secrets/db_root_password
+      MYSQL_DATABASE: fsm_wordpress
+      MYSQL_USER: fsm_user
+      MYSQL_PASSWORD_FILE: /run/secrets/db_password
+    secrets:
+      - db_root_password
+      - db_password
+    networks:
+      - fsm_internal
+    deploy:
+      mode: replicated
+      replicas: 1
+      placement:
+        constraints:
+          - node.role == manager
+      labels:
+        - "io.portainer.stack=fsm"
+      restart_policy:
+        condition: on-failure
+        delay: 5s
+        max_attempts: 3
+    healthcheck:
+      test: ["CMD", "healthcheck.sh", "--connect", "--innodb_initialized"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 60s
+
+  # ---------------------------------------------------------------------------
+  # Redis Object Cache
+  # ---------------------------------------------------------------------------
+  redis:
+    image: redis:7-alpine
+    command: redis-server --appendonly yes --maxmemory 128mb --maxmemory-policy allkeys-lru
+    volumes:
+      - redis_data:/data
+    networks:
+      - fsm_internal
+    deploy:
+      mode: replicated
+      replicas: 1
+      labels:
+        - "io.portainer.stack=fsm"
+      restart_policy:
+        condition: on-failure
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  # ---------------------------------------------------------------------------
+  # WordPress (Headless API)
+  # ---------------------------------------------------------------------------
+  wordpress:
+    build:
+      context: ./wordpress
+      dockerfile: Dockerfile
+    image: fsm-wordpress:latest
+    depends_on:
+      - db
+      - redis
+    volumes:
+      - wordpress_data:/var/www/html
+      - ./plugins:/var/www/html/wp-content/plugins/fsm:ro
+      - wordpress_uploads:/var/www/html/wp-content/uploads
+    environment:
+      WORDPRESS_DB_HOST: db:3306
+      WORDPRESS_DB_USER: fsm_user
+      WORDPRESS_DB_PASSWORD_FILE: /run/secrets/db_password
+      WORDPRESS_DB_NAME: fsm_wordpress
+      WORDPRESS_TABLE_PREFIX: fsm_
+      WORDPRESS_CONFIG_EXTRA: |
+        /* Site URLs */
+        define('WP_HOME', 'https://fsm-api.steinmetz.ltd');
+        define('WP_SITEURL', 'https://fsm-api.steinmetz.ltd');
+
+        /* Headless mode - disable frontend theme rendering */
+        define('FSM_HEADLESS_MODE', true);
+
+        /* Redis Object Cache */
+        define('WP_REDIS_HOST', 'redis');
+        define('WP_REDIS_PORT', 6379);
+        define('WP_REDIS_PREFIX', 'fsm_');
+        define('WP_REDIS_DATABASE', 0);
+
+        /* Security hardening */
+        define('DISALLOW_FILE_EDIT', true);
+        define('WP_AUTO_UPDATE_CORE', false);
+
+        /* JWT Authentication */
+        define('JWT_AUTH_SECRET_KEY', getenv('JWT_SECRET'));
+        define('JWT_AUTH_CORS_ENABLE', true);
+
+        /* Git Updater - GitHub Access Token */
+        define('GITHUB_ACCESS_TOKEN', getenv('GITHUB_ACCESS_TOKEN'));
+
+        /* Mumble Integration */
+        define('FSM_MUMBLE_HOST', 'mumble_mumble-server');
+        define('FSM_MUMBLE_PORT', 64738);
+
+        /* Debug (disable in production) */
+        define('WP_DEBUG', false);
+        define('WP_DEBUG_LOG', false);
+      JWT_SECRET_FILE: /run/secrets/jwt_secret
+      GITHUB_ACCESS_TOKEN_FILE: /run/secrets/github_token
+    secrets:
+      - db_password
+      - jwt_secret
+      - github_token
+    networks:
+      - fsm_internal
+      - traefik-public
+      - mumble_mumble-internal
+    deploy:
+      mode: replicated
+      replicas: 1
+      placement:
+        constraints:
+          - node.role == manager
+      labels:
+        - "io.portainer.stack=fsm"
+        # Traefik configuration
+        - "traefik.enable=true"
+        - "traefik.docker.network=traefik-public"
+        # HTTPS Router
+        - "traefik.http.routers.fsm-api.rule=Host(`fsm-api.steinmetz.ltd`)"
+        - "traefik.http.routers.fsm-api.entrypoints=websecure"
+        - "traefik.http.routers.fsm-api.tls=true"
+        - "traefik.http.routers.fsm-api.tls.certresolver=letsencrypt"
+        - "traefik.http.services.fsm-api.loadbalancer.server.port=80"
+        # HTTP to HTTPS redirect
+        - "traefik.http.routers.fsm-api-http.rule=Host(`fsm-api.steinmetz.ltd`)"
+        - "traefik.http.routers.fsm-api-http.entrypoints=web"
+        - "traefik.http.routers.fsm-api-http.middlewares=fsm-redirect-https"
+        - "traefik.http.middlewares.fsm-redirect-https.redirectscheme.scheme=https"
+        # CORS middleware for API
+        - "traefik.http.middlewares.fsm-cors.headers.accesscontrolallowmethods=GET,OPTIONS,PUT,POST,DELETE,PATCH"
+        - "traefik.http.middlewares.fsm-cors.headers.accesscontrolallowheaders=Authorization,Content-Type,X-WP-Nonce"
+        - "traefik.http.middlewares.fsm-cors.headers.accesscontrolalloworiginlist=https://fsm.steinmetz.ltd"
+        - "traefik.http.middlewares.fsm-cors.headers.accesscontrolmaxage=86400"
+        - "traefik.http.routers.fsm-api.middlewares=fsm-cors"
+      restart_policy:
+        condition: on-failure
+        delay: 5s
+        max_attempts: 3
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost/wp-json/"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 120s
+
+  # ---------------------------------------------------------------------------
+  # React Frontend
+  # ---------------------------------------------------------------------------
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+      args:
+        VITE_API_URL: https://fsm-api.steinmetz.ltd/wp-json
+    image: fsm-frontend:latest
+    depends_on:
+      - wordpress
+    networks:
+      - traefik-public
+    deploy:
+      mode: replicated
+      replicas: 1
+      placement:
+        constraints:
+          - node.role == manager
+      labels:
+        - "io.portainer.stack=fsm"
+        # Traefik configuration
+        - "traefik.enable=true"
+        - "traefik.docker.network=traefik-public"
+        # HTTPS Router
+        - "traefik.http.routers.fsm-frontend.rule=Host(`fsm.steinmetz.ltd`)"
+        - "traefik.http.routers.fsm-frontend.entrypoints=websecure"
+        - "traefik.http.routers.fsm-frontend.tls=true"
+        - "traefik.http.routers.fsm-frontend.tls.certresolver=letsencrypt"
+        - "traefik.http.services.fsm-frontend.loadbalancer.server.port=80"
+        # HTTP to HTTPS redirect
+        - "traefik.http.routers.fsm-frontend-http.rule=Host(`fsm.steinmetz.ltd`)"
+        - "traefik.http.routers.fsm-frontend-http.entrypoints=web"
+        - "traefik.http.routers.fsm-frontend-http.middlewares=fsm-redirect-https"
+      restart_policy:
+        condition: on-failure
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost/"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+# =============================================================================
+# Networks
+# =============================================================================
+networks:
+  fsm_internal:
+    driver: overlay
+    attachable: true
+  traefik-public:
+    external: true
+  # Connect to existing Mumble network for PTT integration
+  mumble_mumble-internal:
+    external: true
+
+# =============================================================================
+# Volumes
+# =============================================================================
+volumes:
+  db_data:
+  redis_data:
+  wordpress_data:
+  wordpress_uploads:
+
+# =============================================================================
+# Secrets
+# =============================================================================
+# Create secrets before deploying:
+# echo "your_db_root_password" | docker secret create fsm_db_root_password -
+# echo "your_db_password" | docker secret create fsm_db_password -
+# echo "your_jwt_secret" | docker secret create fsm_jwt_secret -
+# echo "your_github_token" | docker secret create fsm_github_token -
+# =============================================================================
+secrets:
+  db_root_password:
+    external: true
+    name: fsm_db_root_password
+  db_password:
+    external: true
+    name: fsm_db_password
+  jwt_secret:
+    external: true
+    name: fsm_jwt_secret
+  github_token:
+    external: true
+    name: fsm_github_token
