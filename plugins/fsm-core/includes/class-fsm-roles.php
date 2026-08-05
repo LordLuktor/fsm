@@ -57,6 +57,7 @@ class FSM_Roles {
 
             // GPS capabilities
             'fsm_update_location' => __('Update Own Location', 'fsm-core'),
+            'fsm_view_group_locations' => __('View Group Technician Locations', 'fsm-core'),
             'fsm_view_all_locations' => __('View All Locations', 'fsm-core'),
 
             // PTT capabilities
@@ -65,6 +66,10 @@ class FSM_Roles {
 
             // Settings
             'fsm_manage_settings' => __('Manage FSM Settings', 'fsm-core'),
+
+            // Billing capabilities
+            'fsm_view_billing' => __('View Invoices', 'fsm-core'),
+            'fsm_manage_billing' => __('Manage Invoices & Billing Settings', 'fsm-core'),
         ];
     }
 
@@ -102,6 +107,8 @@ class FSM_Roles {
             'fsm_use_ptt' => true,
             'fsm_manage_ptt' => true,
             'fsm_manage_settings' => true,
+            'fsm_view_billing' => true,
+            'fsm_manage_billing' => true,
         ]);
 
         // FSM Dispatcher - Manages work orders and scheduling
@@ -116,22 +123,55 @@ class FSM_Roles {
             'fsm_edit_work_orders' => true,
             'fsm_assign_work_orders' => true,
             'fsm_view_technicians' => true,
+            'fsm_manage_technicians' => true,
             'fsm_view_technician_locations' => true,
             'fsm_view_vehicles' => true,
+            'fsm_manage_vehicles' => true,
             'fsm_view_inventory' => true,
+            'fsm_manage_inventory' => true,
+            'fsm_view_own_inventory' => true,
+            'fsm_consume_inventory' => true,
             'fsm_view_dispatch' => true,
             'fsm_manage_dispatch' => true,
             'fsm_view_all_locations' => true,
             'fsm_use_ptt' => true,
+            'fsm_manage_ptt' => true,
+            'fsm_view_billing' => true,
         ]);
 
-        // FSM Technician - Limited to assigned work
+        // FSM Lead Technician - Can manage their tech group's jobs, PTT, and view group locations
+        add_role('fsm_lead_technician', __('FSM Lead Technician', 'fsm-core'), [
+            'read' => true,
+            'upload_files' => true,
+
+            'fsm_access' => true,
+            'fsm_view_work_orders' => true,
+            'fsm_view_own_work_orders' => true,
+            'fsm_create_work_orders' => true,
+            'fsm_edit_work_orders' => true,
+            'fsm_assign_work_orders' => true,         // Move jobs within their group
+            'fsm_view_technicians' => true,            // See their group's techs
+            'fsm_view_technician_locations' => true,   // See group locations on map
+            'fsm_view_vehicles' => true,
+            'fsm_view_inventory' => true,
+            'fsm_view_own_inventory' => true,
+            'fsm_consume_inventory' => true,
+            'fsm_view_dispatch' => true,               // View dispatch board
+            'fsm_manage_dispatch' => true,             // Reassign within group
+            'fsm_update_location' => true,
+            'fsm_view_group_locations' => true,        // New: view own group's GPS
+            'fsm_use_ptt' => true,
+            'fsm_manage_ptt' => true,                  // Create/manage group talk groups
+        ]);
+
+        // FSM Technician - Can view own work + create work orders + limited GPS
         add_role('fsm_technician', __('FSM Technician', 'fsm-core'), [
             'read' => true,
             'upload_files' => true,
 
             'fsm_access' => true,
             'fsm_view_own_work_orders' => true,
+            'fsm_create_work_orders' => true,
             'fsm_view_own_inventory' => true,
             'fsm_consume_inventory' => true,
             'fsm_update_location' => true,
@@ -154,6 +194,7 @@ class FSM_Roles {
     public static function remove_roles() {
         remove_role('fsm_administrator');
         remove_role('fsm_dispatcher');
+        remove_role('fsm_lead_technician');
         remove_role('fsm_technician');
 
         // Remove capabilities from administrator
@@ -184,6 +225,17 @@ class FSM_Roles {
      * @param int|null $user_id User ID (default: current user).
      * @return bool
      */
+    /**
+     * Check if user is a lead technician.
+     */
+    public static function is_lead_technician($user_id = null) {
+        if (null === $user_id) {
+            $user_id = get_current_user_id();
+        }
+        $user = get_userdata($user_id);
+        return $user && in_array('fsm_lead_technician', $user->roles, true);
+    }
+
     public static function is_technician($user_id = null) {
         if (null === $user_id) {
             $user_id = get_current_user_id();

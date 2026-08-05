@@ -115,6 +115,54 @@ class FSM_Work_Order_REST_API {
             'args' => self::get_collection_params(),
         ]);
 
+        // Work order types (enriched with term meta)
+        register_rest_route(self::NAMESPACE, '/work-order-types/configured', [
+            'methods' => WP_REST_Server::READABLE,
+            'callback' => [__CLASS__, 'get_configured_types'],
+            'permission_callback' => function() {
+                return is_user_logged_in();
+            },
+        ]);
+
+        // Create work order type
+        register_rest_route(self::NAMESPACE, '/work-order-types', [
+            'methods' => WP_REST_Server::CREATABLE,
+            'callback' => [__CLASS__, 'create_work_order_type'],
+            'permission_callback' => function() {
+                return current_user_can('fsm_manage_settings') || current_user_can('manage_options');
+            },
+            'args' => [
+                'name' => ['required' => true, 'type' => 'string', 'sanitize_callback' => 'sanitize_text_field'],
+                'default_duration' => ['type' => 'integer', 'default' => 60, 'sanitize_callback' => 'absint'],
+                'color' => ['type' => 'string', 'default' => '#6b7280', 'sanitize_callback' => 'sanitize_hex_color'],
+                'icon' => ['type' => 'string', 'default' => 'wrench', 'sanitize_callback' => 'sanitize_text_field'],
+            ],
+        ]);
+
+        // Update work order type
+        register_rest_route(self::NAMESPACE, '/work-order-types/(?P<type_id>\d+)', [
+            [
+                'methods' => WP_REST_Server::EDITABLE,
+                'callback' => [__CLASS__, 'update_work_order_type'],
+                'permission_callback' => function() {
+                    return current_user_can('fsm_manage_settings') || current_user_can('manage_options');
+                },
+                'args' => [
+                    'name' => ['type' => 'string', 'sanitize_callback' => 'sanitize_text_field'],
+                    'default_duration' => ['type' => 'integer', 'sanitize_callback' => 'absint'],
+                    'color' => ['type' => 'string', 'sanitize_callback' => 'sanitize_hex_color'],
+                    'icon' => ['type' => 'string', 'sanitize_callback' => 'sanitize_text_field'],
+                ],
+            ],
+            [
+                'methods' => WP_REST_Server::DELETABLE,
+                'callback' => [__CLASS__, 'delete_work_order_type'],
+                'permission_callback' => function() {
+                    return current_user_can('fsm_manage_settings') || current_user_can('manage_options');
+                },
+            ],
+        ]);
+
         // Today's work orders
         register_rest_route(self::NAMESPACE, '/work-orders/today', [
             'methods' => WP_REST_Server::READABLE,
@@ -159,6 +207,10 @@ class FSM_Work_Order_REST_API {
             'search' => [
                 'type' => 'string',
                 'sanitize_callback' => 'sanitize_text_field',
+            ],
+            'has_media' => [
+                'type' => 'boolean',
+                'default' => false,
             ],
             'orderby' => [
                 'default' => 'date',
@@ -221,6 +273,26 @@ class FSM_Work_Order_REST_API {
                 'type' => 'string',
                 'default' => 'normal',
                 'enum' => ['low', 'normal', 'high', 'urgent'],
+            ],
+            'work_order_types' => [
+                'type' => 'array',
+                'items' => ['type' => 'integer'],
+                'default' => [],
+                'sanitize_callback' => function($value) {
+                    return array_map('absint', (array) $value);
+                },
+            ],
+            'estimated_duration' => [
+                'type' => 'integer',
+                'sanitize_callback' => 'absint',
+            ],
+            'scheduled_time_start' => [
+                'type' => 'string',
+                'sanitize_callback' => 'sanitize_text_field',
+            ],
+            'scheduled_time_end' => [
+                'type' => 'string',
+                'sanitize_callback' => 'sanitize_text_field',
             ],
         ];
     }
@@ -373,9 +445,66 @@ class FSM_Work_Order_REST_API {
             ];
         }
 
-        // Search
+        // Extended search: match title, content, reference, customer name/phone,
+        // and address fields. We resolve matching post IDs ourselves and pass
+        // them through post__in so WP_Query's default 's' (title/content only)
+        // doesn't miss meta fields.
+        $search_matched_ids = null;
         if ($search = $request->get_param('search')) {
-            $args['s'] = $search;
+            global $wpdb;
+            $search_like = '%' . $wpdb->esc_like($search) . '%';
+
+            $title_ids = $wpdb->get_col($wpdb->prepare(
+                "SELECT ID FROM {$wpdb->posts}
+                 WHERE post_type = 'fsm_work_order'
+                   AND post_status = 'publish'
+                   AND (post_title LIKE %s OR post_content LIKE %s)",
+                $search_like,
+                $search_like
+            ));
+
+            $meta_ids = $wpdb->get_col($wpdb->prepare(
+                "SELECT DISTINCT post_id FROM {$wpdb->postmeta}
+                 WHERE meta_key IN (
+                    '_fsm_wo_reference',
+                    '_fsm_wo_customer_name',
+                    '_fsm_wo_customer_phone',
+                    '_fsm_wo_customer_email',
+                    '_fsm_wo_address_street',
+                    '_fsm_wo_address_city',
+                    '_fsm_wo_address_zip'
+                 )
+                 AND meta_value LIKE %s",
+                $search_like
+            ));
+
+            $search_matched_ids = array_unique(array_map('intval', array_merge($title_ids, $meta_ids)));
+            if (empty($search_matched_ids)) {
+                // No matches — force empty result
+                $search_matched_ids = [0];
+            }
+        }
+
+        // Filter: only work orders with uploaded media
+        $media_ids = null;
+        if ($request->get_param('has_media') && class_exists('FSM_Work_Order_Media_DB')) {
+            $media_ids = FSM_Work_Order_Media_DB::get_work_order_ids_with_media();
+            if (empty($media_ids)) {
+                $response = rest_ensure_response([]);
+                $response->header('X-WP-Total', 0);
+                $response->header('X-WP-TotalPages', 0);
+                return $response;
+            }
+        }
+
+        // Combine search + media filters (intersect if both present)
+        if ($search_matched_ids !== null && $media_ids !== null) {
+            $combined = array_values(array_intersect($search_matched_ids, $media_ids));
+            $args['post__in'] = empty($combined) ? [0] : $combined;
+        } elseif ($search_matched_ids !== null) {
+            $args['post__in'] = $search_matched_ids;
+        } elseif ($media_ids !== null) {
+            $args['post__in'] = $media_ids;
         }
 
         if (!empty($meta_query)) {
@@ -409,6 +538,11 @@ class FSM_Work_Order_REST_API {
 
         if (!$work_order || $work_order->post_type !== 'fsm_work_order') {
             return FSM_REST_API::error('not_found', __('Work order not found.', 'fsm-work-orders'), 404);
+        }
+
+        $access = FSM_Organizations::verify_post_access($work_order->ID);
+        if (is_wp_error($access)) {
+            return $access;
         }
 
         return rest_ensure_response(self::prepare_work_order($work_order, true));
@@ -462,6 +596,31 @@ class FSM_Work_Order_REST_API {
             update_post_meta($post_id, '_fsm_wo_scheduled_date', $scheduled_date);
         }
 
+        // Scheduling fields
+        foreach (['scheduled_time_start', 'scheduled_time_end'] as $field) {
+            if ($value = $request->get_param($field)) {
+                update_post_meta($post_id, "_fsm_wo_{$field}", sanitize_text_field($value));
+            }
+        }
+        if ($duration = $request->get_param('estimated_duration')) {
+            update_post_meta($post_id, '_fsm_wo_estimated_duration', absint($duration));
+        }
+
+        // Work order types (taxonomy terms)
+        $type_ids = $request->get_param('work_order_types');
+        if (!empty($type_ids)) {
+            // Validate each term exists in the taxonomy
+            $valid_ids = [];
+            foreach ($type_ids as $term_id) {
+                if (term_exists((int) $term_id, 'fsm_work_order_type')) {
+                    $valid_ids[] = (int) $term_id;
+                }
+            }
+            if (!empty($valid_ids)) {
+                wp_set_object_terms($post_id, $valid_ids, 'fsm_work_order_type');
+            }
+        }
+
         // Initialize empty arrays
         update_post_meta($post_id, '_fsm_wo_assigned_technicians', []);
 
@@ -489,6 +648,11 @@ class FSM_Work_Order_REST_API {
             return FSM_REST_API::error('not_found', __('Work order not found.', 'fsm-work-orders'), 404);
         }
 
+        $access = FSM_Organizations::verify_post_access($work_order_id);
+        if (is_wp_error($access)) {
+            return $access;
+        }
+
         // Update post data
         $post_data = ['ID' => $work_order_id];
 
@@ -504,19 +668,51 @@ class FSM_Work_Order_REST_API {
             wp_update_post($post_data);
         }
 
-        // Update meta fields
-        $meta_fields = [
-            'priority', 'customer_name', 'customer_phone', 'customer_email',
+        // Update meta fields (sanitized)
+        $text_fields = [
+            'priority', 'customer_name', 'customer_phone',
             'address_street', 'address_city', 'address_state', 'address_zip',
             'scheduled_date', 'scheduled_time_start', 'scheduled_time_end',
-            'estimated_duration', 'internal_notes', 'latitude', 'longitude',
+            'estimated_duration',
         ];
 
-        foreach ($meta_fields as $field) {
+        foreach ($text_fields as $field) {
             $value = $request->get_param($field);
             if (null !== $value) {
-                update_post_meta($work_order_id, "_fsm_wo_{$field}", $value);
+                update_post_meta($work_order_id, "_fsm_wo_{$field}", sanitize_text_field($value));
             }
+        }
+
+        // Email field
+        $email = $request->get_param('customer_email');
+        if (null !== $email) {
+            update_post_meta($work_order_id, '_fsm_wo_customer_email', sanitize_email($email));
+        }
+
+        // Textarea field
+        $notes = $request->get_param('internal_notes');
+        if (null !== $notes) {
+            update_post_meta($work_order_id, '_fsm_wo_internal_notes', sanitize_textarea_field($notes));
+        }
+
+        // Numeric fields
+        foreach (['latitude', 'longitude'] as $field) {
+            $value = $request->get_param($field);
+            if (null !== $value) {
+                update_post_meta($work_order_id, "_fsm_wo_{$field}", (float) $value);
+            }
+        }
+
+        // Work order types (taxonomy terms)
+        $type_ids = $request->get_param('work_order_types');
+        if (null !== $type_ids) {
+            $valid_ids = [];
+            foreach ((array) $type_ids as $term_id) {
+                if (term_exists((int) $term_id, 'fsm_work_order_type')) {
+                    $valid_ids[] = (int) $term_id;
+                }
+            }
+            wp_set_object_terms($work_order_id, $valid_ids, 'fsm_work_order_type');
         }
 
         // Handle technician assignment (only for dispatchers)
@@ -561,6 +757,11 @@ class FSM_Work_Order_REST_API {
             return FSM_REST_API::error('not_found', __('Work order not found.', 'fsm-work-orders'), 404);
         }
 
+        $access = FSM_Organizations::verify_post_access($work_order_id);
+        if (is_wp_error($access)) {
+            return $access;
+        }
+
         $reference = get_post_meta($work_order_id, '_fsm_wo_reference', true);
 
         wp_delete_post($work_order_id, true);
@@ -581,6 +782,11 @@ class FSM_Work_Order_REST_API {
     public static function update_status($request) {
         $work_order_id = (int) $request->get_param('id');
         $new_status = $request->get_param('status');
+
+        $access = FSM_Organizations::verify_post_access($work_order_id);
+        if (is_wp_error($access)) {
+            return $access;
+        }
 
         $result = FSM_Work_Order_Status::transition($work_order_id, $new_status);
 
@@ -702,6 +908,171 @@ class FSM_Work_Order_REST_API {
     }
 
     /**
+     * Get configured work order types with term meta.
+     */
+    public static function get_configured_types() {
+        $terms = get_terms([
+            'taxonomy'   => 'fsm_work_order_type',
+            'hide_empty' => false,
+        ]);
+
+        if (is_wp_error($terms)) {
+            return rest_ensure_response([]);
+        }
+
+        $types = [];
+        foreach ($terms as $term) {
+            $types[] = [
+                'id'               => $term->term_id,
+                'name'             => esc_html($term->name),
+                'slug'             => $term->slug,
+                'default_duration' => absint(get_term_meta($term->term_id, '_fsm_wot_default_duration', true)) ?: 60,
+                'color'            => sanitize_hex_color(get_term_meta($term->term_id, '_fsm_wot_color', true)) ?: '#6b7280',
+                'icon'             => esc_attr(get_term_meta($term->term_id, '_fsm_wot_icon', true)) ?: 'wrench',
+            ];
+        }
+
+        return rest_ensure_response($types);
+    }
+
+    /**
+     * Prepare work order type terms with meta for API responses.
+     *
+     * @param int $post_id Work order post ID.
+     * @return array
+     */
+    /**
+     * Create a new work order type.
+     */
+    public static function create_work_order_type($request) {
+        $name = $request->get_param('name');
+
+        // Check if term with this name already exists
+        $existing = term_exists($name, 'fsm_work_order_type');
+        if ($existing) {
+            return new WP_Error('type_exists', __('A work order type with this name already exists.', 'fsm-work-orders'), ['status' => 400]);
+        }
+
+        $result = wp_insert_term($name, 'fsm_work_order_type');
+        if (is_wp_error($result)) {
+            return $result;
+        }
+
+        $term_id = $result['term_id'];
+
+        update_term_meta($term_id, '_fsm_wot_default_duration', $request->get_param('default_duration'));
+        update_term_meta($term_id, '_fsm_wot_color', $request->get_param('color'));
+        update_term_meta($term_id, '_fsm_wot_icon', $request->get_param('icon'));
+
+        return rest_ensure_response([
+            'id'               => (int) $term_id,
+            'name'             => esc_html($name),
+            'slug'             => get_term($term_id, 'fsm_work_order_type')->slug,
+            'default_duration' => absint($request->get_param('default_duration')),
+            'color'            => $request->get_param('color'),
+            'icon'             => $request->get_param('icon'),
+        ]);
+    }
+
+    /**
+     * Update a work order type.
+     */
+    public static function update_work_order_type($request) {
+        $term_id = (int) $request->get_param('type_id');
+        $term = get_term($term_id, 'fsm_work_order_type');
+
+        if (!$term || is_wp_error($term)) {
+            return new WP_Error('not_found', __('Work order type not found.', 'fsm-work-orders'), ['status' => 404]);
+        }
+
+        // Update name if provided
+        $name = $request->get_param('name');
+        if ($name && $name !== $term->name) {
+            $result = wp_update_term($term_id, 'fsm_work_order_type', ['name' => $name]);
+            if (is_wp_error($result)) {
+                return $result;
+            }
+        }
+
+        // Update term meta
+        $duration = $request->get_param('default_duration');
+        if (null !== $duration) {
+            update_term_meta($term_id, '_fsm_wot_default_duration', absint($duration));
+        }
+
+        $color = $request->get_param('color');
+        if (null !== $color) {
+            update_term_meta($term_id, '_fsm_wot_color', sanitize_hex_color($color));
+        }
+
+        $icon = $request->get_param('icon');
+        if (null !== $icon) {
+            update_term_meta($term_id, '_fsm_wot_icon', sanitize_text_field($icon));
+        }
+
+        $updated = get_term($term_id, 'fsm_work_order_type');
+
+        return rest_ensure_response([
+            'id'               => (int) $term_id,
+            'name'             => esc_html($updated->name),
+            'slug'             => $updated->slug,
+            'default_duration' => absint(get_term_meta($term_id, '_fsm_wot_default_duration', true)) ?: 60,
+            'color'            => sanitize_hex_color(get_term_meta($term_id, '_fsm_wot_color', true)) ?: '#6b7280',
+            'icon'             => esc_attr(get_term_meta($term_id, '_fsm_wot_icon', true)) ?: 'wrench',
+        ]);
+    }
+
+    /**
+     * Delete a work order type.
+     */
+    public static function delete_work_order_type($request) {
+        $term_id = (int) $request->get_param('type_id');
+        $term = get_term($term_id, 'fsm_work_order_type');
+
+        if (!$term || is_wp_error($term)) {
+            return new WP_Error('not_found', __('Work order type not found.', 'fsm-work-orders'), ['status' => 404]);
+        }
+
+        // Check if any work orders use this type
+        $count = $term->count;
+        if ($count > 0) {
+            return new WP_Error(
+                'type_in_use',
+                sprintf(__('Cannot delete: %d work order(s) use this type. Reassign them first.', 'fsm-work-orders'), $count),
+                ['status' => 400]
+            );
+        }
+
+        // Delete term meta first
+        delete_term_meta($term_id, '_fsm_wot_default_duration');
+        delete_term_meta($term_id, '_fsm_wot_color');
+        delete_term_meta($term_id, '_fsm_wot_icon');
+
+        $deleted = wp_delete_term($term_id, 'fsm_work_order_type');
+        if (is_wp_error($deleted)) {
+            return $deleted;
+        }
+
+        return rest_ensure_response(['deleted' => true, 'id' => $term_id]);
+    }
+
+    public static function prepare_types($post_id) {
+        $terms = wp_get_post_terms($post_id, 'fsm_work_order_type', ['fields' => 'all']);
+        if (is_wp_error($terms)) {
+            return [];
+        }
+        return array_map(function($term) {
+            return [
+                'id'    => $term->term_id,
+                'name'  => esc_html($term->name),
+                'slug'  => $term->slug,
+                'color' => sanitize_hex_color(get_term_meta($term->term_id, '_fsm_wot_color', true)) ?: '#6b7280',
+                'icon'  => esc_attr(get_term_meta($term->term_id, '_fsm_wot_icon', true)) ?: 'wrench',
+            ];
+        }, $terms);
+    }
+
+    /**
      * Prepare work order for response.
      */
     private static function prepare_work_order($post, $include_details = false) {
@@ -742,19 +1113,25 @@ class FSM_Work_Order_REST_API {
         $data['assigned_technicians'] = is_array($assigned) ? $assigned : [];
         $data['primary_technician_id'] = get_post_meta($post->ID, '_fsm_wo_primary_technician_id', true);
 
+        // Always include types (with color/icon meta)
+        $data['types'] = self::prepare_types($post->ID);
+
+        // Always include estimated_duration for scheduling displays
+        $data['estimated_duration'] = absint(get_post_meta($post->ID, '_fsm_wo_estimated_duration', true)) ?: 60;
+
+        // Media count (optional attachments for content production)
+        if (class_exists('FSM_Work_Order_Media_DB')) {
+            $data['media_count'] = FSM_Work_Order_Media_DB::count_by_work_order($post->ID);
+        } else {
+            $data['media_count'] = 0;
+        }
+
         if ($include_details) {
             $data['description'] = $post->post_content;
-            $data['estimated_duration'] = get_post_meta($post->ID, '_fsm_wo_estimated_duration', true) ?: 60;
             $data['scheduled_time_end'] = get_post_meta($post->ID, '_fsm_wo_scheduled_time_end', true);
             $data['started_at'] = get_post_meta($post->ID, '_fsm_wo_started_at', true);
             $data['completed_at'] = get_post_meta($post->ID, '_fsm_wo_completed_at', true);
             $data['internal_notes'] = get_post_meta($post->ID, '_fsm_wo_internal_notes', true);
-
-            // Get work order type
-            $types = wp_get_post_terms($post->ID, 'fsm_work_order_type', ['fields' => 'all']);
-            $data['types'] = array_map(function($term) {
-                return ['id' => $term->term_id, 'name' => $term->name];
-            }, $types);
 
             // Get note count
             $data['note_count'] = get_comments([

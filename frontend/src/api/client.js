@@ -44,6 +44,20 @@ export const auth = {
     client.get('/fsm/v1/me'),
   getCapabilities: () =>
     client.get('/fsm/v1/me/capabilities'),
+  register: (data) =>
+    client.post('/fsm/v1/register', data),
+};
+
+// Demo endpoints
+export const demo = {
+  getTemplates: () =>
+    client.get('/fsm/v1/demo/templates'),
+  login: (template = 'plumbing', role = 'dispatcher') =>
+    client.post('/fsm/v1/demo/login', { template, role }),
+  logout: () =>
+    client.post('/fsm/v1/demo/logout'),
+  reset: () =>
+    client.post('/fsm/v1/demo/reset'),
 };
 
 // Work Orders
@@ -59,6 +73,24 @@ export const workOrders = {
     client.post(`/fsm/v1/work-orders/${id}/notes`, { content, type }),
   getMine: (params) => client.get('/fsm/v1/work-orders/mine', { params }),
   getToday: () => client.get('/fsm/v1/work-orders/today'),
+
+  // --- Optional media attachments (photos/videos for proof-of-work + content production) ---
+  listMedia: (id) => client.get(`/fsm/v1/work-orders/${id}/media`),
+  uploadMedia: (id, files, onProgress) => {
+    const formData = new FormData();
+    const fileList = Array.isArray(files) ? files : [files];
+    if (fileList.length === 1) {
+      formData.append('file', fileList[0]);
+    } else {
+      fileList.forEach((f) => formData.append('file[]', f));
+    }
+    return client.post(`/fsm/v1/work-orders/${id}/media`, formData, {
+      headers: { 'Content-Type': 'multipart/form-data' },
+      onUploadProgress: onProgress,
+    });
+  },
+  deleteMedia: (id, mediaId) =>
+    client.delete(`/fsm/v1/work-orders/${id}/media/${mediaId}`),
 };
 
 // Dispatch
@@ -98,8 +130,13 @@ export const inventory = {
   create: (data) => client.post('/fsm/v1/inventory', data),
   update: (id, data) => client.patch(`/fsm/v1/inventory/${id}`, data),
   getMine: () => client.get('/fsm/v1/inventory/mine'),
+  getMyVehicle: () => client.get('/fsm/v1/inventory/my-vehicle'),
   getTechnicianInventory: (technicianId) =>
     client.get(`/fsm/v1/inventory/technician/${technicianId}`),
+  getVehicleInventory: (vehicleId) =>
+    client.get(`/fsm/v1/inventory/vehicle/${vehicleId}`),
+  getAllVehiclesInventory: () =>
+    client.get('/fsm/v1/inventory/vehicles'),
   consume: (itemId, quantity, workOrderId, notes) =>
     client.post('/fsm/v1/inventory/consume', {
       item_id: itemId,
@@ -115,6 +152,7 @@ export const inventory = {
       to_location_id: toLocationId,
     }),
   getLowStock: () => client.get('/fsm/v1/inventory/low-stock'),
+  getTransactions: (params) => client.get('/fsm/v1/inventory/transactions', { params }),
 };
 
 // GPS
@@ -132,6 +170,8 @@ export const gps = {
       latitude,
       longitude,
     }),
+  getNearby: (params) => client.get('/fsm/v1/gps/nearby', { params }),
+  getGroupLocations: () => client.get('/fsm/v1/gps/group'),
 };
 
 // PTT
@@ -144,16 +184,63 @@ export const ptt = {
     client.post(`/fsm/v1/ptt/work-order/${workOrderId}/channel`),
 };
 
+// Account
+export const account = {
+  changePassword: (currentPassword, newPassword) =>
+    client.post('/fsm/v1/account/password', {
+      current_password: currentPassword,
+      new_password: newPassword,
+    }),
+  updateProfile: (data) => client.post('/fsm/v1/account/profile', data),
+  getSessions: () => client.get('/fsm/v1/account/sessions'),
+  destroyOtherSessions: () =>
+    client.post('/fsm/v1/account/sessions/destroy-others'),
+};
+
+// Settings (admin)
+export const settings = {
+  getNotificationConfig: () => client.get('/fsm/v1/settings/notifications'),
+  updateNotificationConfig: (data) =>
+    client.post('/fsm/v1/settings/notifications', data),
+  getCompanySettings: () => client.get('/fsm/v1/settings/company'),
+  updateCompanySettings: (data) =>
+    client.post('/fsm/v1/settings/company', data),
+  getSmtpConfig: () => client.get('/fsm/v1/settings/smtp'),
+  updateSmtpConfig: (data) => client.post('/fsm/v1/settings/smtp', data),
+  testSmtp: (to) => client.post('/fsm/v1/settings/smtp/test', { to }),
+};
+
+// Team Management
+export const team = {
+  list: () => client.get('/fsm/v1/team'),
+  get: (id) => client.get(`/fsm/v1/team/${id}`),
+  add: (data) => client.post('/fsm/v1/team', data),
+  update: (id, data) => client.patch(`/fsm/v1/team/${id}`, data),
+  deactivate: (id) => client.delete(`/fsm/v1/team/${id}`),
+};
+
+// Work Order Types
+export const workOrderTypes = {
+  list: () => client.get('/fsm/v1/work-order-types/configured'),
+  create: (data) => client.post('/fsm/v1/work-order-types', data),
+  update: (id, data) => client.patch(`/fsm/v1/work-order-types/${id}`, data),
+  delete: (id) => client.delete(`/fsm/v1/work-order-types/${id}`),
+};
+
 // Technicians
 export const technicians = {
   list: (params) => client.get('/fsm/v1/technicians', { params }),
   get: (id) => client.get(`/fsm/v1/technicians/${id}`),
+  create: (data) => client.post('/fsm/v1/technicians', data),
+  update: (id, data) => client.patch(`/fsm/v1/technicians/${id}`, data),
 };
 
 // Vehicles
 export const vehicles = {
   list: (params) => client.get('/fsm/v1/vehicles', { params }),
   get: (id) => client.get(`/fsm/v1/vehicles/${id}`),
+  create: (data) => client.post('/fsm/v1/vehicles', data),
+  update: (id, data) => client.patch(`/fsm/v1/vehicles/${id}`, data),
 };
 
 export default client;

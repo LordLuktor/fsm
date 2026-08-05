@@ -89,6 +89,104 @@ final class FSM_PTT {
     private function init_hooks() {
         register_activation_hook(FSM_PTT_FILE, [$this, 'activate']);
         add_action('rest_api_init', [FSM_PTT_REST_API::class, 'register_routes']);
+
+        // Mumble integration hooks
+        add_action('fsm_organization_created', [$this, 'provision_organization_in_mumble'], 10, 3);
+        add_action('fsm_user_organization_changed', [$this, 'sync_user_to_mumble'], 10, 3);
+
+        // Clean up on organization delete
+        add_action('before_delete_post', [$this, 'deprovision_organization_from_mumble']);
+    }
+
+    /**
+     * Provision organization in Mumble when created in FSM.
+     *
+     * @param int    $org_id Organization ID.
+     * @param string $name   Organization name.
+     * @param string $slug   Organization slug.
+     */
+    public function provision_organization_in_mumble($org_id, $name, $slug) {
+        // Check if Mumble integration is available
+        if (!FSM_Mumble_Integration::is_available()) {
+            FSM_Utilities::log_activity('mumble_provision_skipped', [
+                'org_id' => $org_id,
+                'reason' => 'Mumble backend not available',
+            ]);
+            return;
+        }
+
+        // Provision in Mumble
+        $result = FSM_Mumble_Integration::provision_organization($org_id, $name, $slug);
+
+        if (is_wp_error($result)) {
+            FSM_Utilities::log_activity('mumble_provision_failed', [
+                'org_id' => $org_id,
+                'error' => $result->get_error_message(),
+            ]);
+        }
+    }
+
+    /**
+     * Sync user to Mumble when organization changes.
+     *
+     * @param int      $user_id      User ID.
+     * @param int      $org_id       New organization ID.
+     * @param int|null $previous_org Previous organization ID.
+     */
+    public function sync_user_to_mumble($user_id, $org_id, $previous_org) {
+        // Check if Mumble integration is available
+        if (!FSM_Mumble_Integration::is_available()) {
+            return;
+        }
+
+        // Remove from previous org if applicable
+        if ($previous_org && FSM_Mumble_Integration::is_user_registered($user_id)) {
+            FSM_Mumble_Integration::remove_user_from_organization($user_id, $previous_org);
+        }
+
+        // Register in new org
+        if ($org_id && FSM_Mumble_Integration::is_organization_provisioned($org_id)) {
+            FSM_Mumble_Integration::register_user($user_id, $org_id);
+        }
+    }
+
+    /**
+     * Deprovision organization from Mumble when deleted.
+     *
+     * @param int $post_id Post ID.
+     */
+    public function deprovision_organization_from_mumble($post_id) {
+        $post = get_post($post_id);
+        if (!$post || $post->post_type !== 'fsm_organization') {
+            return;
+        }
+
+        if (!FSM_Mumble_Integration::is_organization_provisioned($post_id)) {
+            // Nothing was ever provisioned for this org — nothing to clean up.
+            return;
+        }
+
+        if (!FSM_Mumble_Integration::is_available()) {
+            // Mumble is unreachable right now. Previously this silently gave up,
+            // leaving the channel orphaned forever with no record of the failure.
+            // Log it so orphaned channels are traceable instead of invisible.
+            FSM_Utilities::log_activity('mumble_deprovision_skipped', [
+                'org_id' => $post_id,
+                'reason' => 'Mumble backend not available',
+                'root_channel_id' => get_post_meta($post_id, '_fsm_mumble_root_channel_id', true),
+            ]);
+            return;
+        }
+
+        $result = FSM_Mumble_Integration::deprovision_organization($post_id);
+
+        if (is_wp_error($result)) {
+            FSM_Utilities::log_activity('mumble_deprovision_failed', [
+                'org_id' => $post_id,
+                'error' => $result->get_error_message(),
+                'root_channel_id' => get_post_meta($post_id, '_fsm_mumble_root_channel_id', true),
+            ]);
+        }
     }
 
     /**

@@ -1,5 +1,5 @@
 import { createContext, useContext, useState, useEffect, useCallback } from 'react';
-import { auth } from '../api/client';
+import { auth, demo } from '../api/client';
 
 const AuthContext = createContext(null);
 
@@ -52,15 +52,32 @@ export function AuthProvider({ children }) {
       await loadUser();
       return true;
     } catch (err) {
-      const message = err.response?.data?.message || 'Login failed';
+      const raw = err.response?.data?.message || 'Login failed';
+      // Strip HTML tags from WordPress error messages
+      const message = typeof raw === 'string' ? raw.replace(/<[^>]*>/g, '') : raw;
       setError(message);
       throw new Error(message);
     }
   };
 
-  const logout = () => {
+  const logout = async () => {
+    // Check if this is a demo session
+    const isDemo = localStorage.getItem('fsm_is_demo') === 'true';
+
+    if (isDemo) {
+      try {
+        // Call demo logout to reset data
+        await demo.logout();
+      } catch (err) {
+        console.error('Demo logout error:', err);
+      }
+    }
+
+    // Clear all local storage
     localStorage.removeItem('fsm_token');
     localStorage.removeItem('fsm_user');
+    localStorage.removeItem('fsm_is_demo');
+    localStorage.removeItem('fsm_demo_template');
     setUser(null);
     setCapabilities({});
   };
@@ -70,6 +87,7 @@ export function AuthProvider({ children }) {
   };
 
   const isTechnician = user?.is_technician === true;
+  const isLeadTechnician = user?.is_lead_technician === true;
   const isDispatcher = user?.is_dispatcher === true;
   const isAdmin = user?.is_admin === true;
 
@@ -82,6 +100,7 @@ export function AuthProvider({ children }) {
     logout,
     hasCapability,
     isTechnician,
+    isLeadTechnician,
     isDispatcher,
     isAdmin,
     isAuthenticated: !!user,

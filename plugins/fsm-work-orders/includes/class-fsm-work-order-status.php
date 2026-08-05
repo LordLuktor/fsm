@@ -159,16 +159,26 @@ class FSM_Work_Order_Status {
      */
     private static function handle_transition($work_order_id, $old_status, $new_status) {
         switch ($new_status) {
+            case 'en_route':
+                self::update_assigned_tech_status($work_order_id, 'en_route');
+                break;
+
             case 'in_progress':
                 // Record start time if not already set
                 if (!get_post_meta($work_order_id, '_fsm_wo_started_at', true)) {
                     update_post_meta($work_order_id, '_fsm_wo_started_at', current_time('mysql'));
                 }
+                self::update_assigned_tech_status($work_order_id, 'on_job');
                 break;
 
             case 'completed':
                 // Record completion time
                 update_post_meta($work_order_id, '_fsm_wo_completed_at', current_time('mysql'));
+                self::update_assigned_tech_status($work_order_id, 'available');
+                break;
+
+            case 'on_hold':
+                self::update_assigned_tech_status($work_order_id, 'available');
                 break;
 
             case 'new':
@@ -180,6 +190,20 @@ class FSM_Work_Order_Status {
                     delete_post_meta($work_order_id, '_fsm_wo_completed_at');
                 }
                 break;
+        }
+    }
+
+    /**
+     * Update the status of assigned technicians when a WO transitions.
+     *
+     * @param int    $work_order_id Work order ID.
+     * @param string $tech_status New technician status.
+     */
+    private static function update_assigned_tech_status($work_order_id, $tech_status) {
+        $primary_id = get_post_meta($work_order_id, '_fsm_wo_primary_technician_id', true);
+        if ($primary_id) {
+            update_post_meta($primary_id, '_fsm_tech_status', sanitize_text_field($tech_status));
+            update_post_meta($primary_id, '_fsm_status', sanitize_text_field($tech_status));
         }
     }
 

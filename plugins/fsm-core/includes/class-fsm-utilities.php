@@ -67,7 +67,7 @@ class FSM_Utilities {
             'meta_query' => [
                 [
                     'key' => '_fsm_status',
-                    'value' => ['available', 'busy'],
+                    'value' => ['available', 'busy', 'on_job', 'en_route'],
                     'compare' => 'IN',
                 ],
             ],
@@ -281,10 +281,10 @@ class FSM_Utilities {
     public static function get_client_ip() {
         $ip = '';
 
-        if (!empty($_SERVER['HTTP_CLIENT_IP'])) {
-            $ip = $_SERVER['HTTP_CLIENT_IP'];
-        } elseif (!empty($_SERVER['HTTP_X_FORWARDED_FOR'])) {
-            $ip = explode(',', $_SERVER['HTTP_X_FORWARDED_FOR'])[0];
+        // Trust X-Forwarded-For (set by Traefik), then fall back to REMOTE_ADDR.
+        // Do NOT trust HTTP_CLIENT_IP as it is attacker-controlled.
+        if (!empty($_SERVER['HTTP_X_FORWARDED_FOR'])) {
+            $ip = trim(explode(',', $_SERVER['HTTP_X_FORWARDED_FOR'])[0]);
         } elseif (!empty($_SERVER['REMOTE_ADDR'])) {
             $ip = $_SERVER['REMOTE_ADDR'];
         }

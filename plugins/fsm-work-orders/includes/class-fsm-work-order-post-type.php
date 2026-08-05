@@ -147,13 +147,13 @@ class FSM_Work_Order_Post_Type {
                 'type' => 'number',
                 'description' => 'Location latitude',
                 'single' => true,
-                'sanitize_callback' => 'floatval',
+                'sanitize_callback' => [__CLASS__, 'sanitize_float'],
             ],
             'longitude' => [
                 'type' => 'number',
                 'description' => 'Location longitude',
                 'single' => true,
-                'sanitize_callback' => 'floatval',
+                'sanitize_callback' => [__CLASS__, 'sanitize_float'],
             ],
             // Scheduling
             'scheduled_date' => [
@@ -266,6 +266,34 @@ class FSM_Work_Order_Post_Type {
             'show_admin_column' => true,
             'rewrite' => false,
         ]);
+
+        // Register term meta for type configuration.
+        register_term_meta('fsm_work_order_type', '_fsm_wot_default_duration', [
+            'type'              => 'integer',
+            'description'       => 'Default estimated duration in minutes',
+            'single'            => true,
+            'default'           => 60,
+            'sanitize_callback' => 'absint',
+            'show_in_rest'      => true,
+        ]);
+
+        register_term_meta('fsm_work_order_type', '_fsm_wot_color', [
+            'type'              => 'string',
+            'description'       => 'Hex color for the type badge',
+            'single'            => true,
+            'default'           => '#6b7280',
+            'sanitize_callback' => 'sanitize_hex_color',
+            'show_in_rest'      => true,
+        ]);
+
+        register_term_meta('fsm_work_order_type', '_fsm_wot_icon', [
+            'type'              => 'string',
+            'description'       => 'Icon identifier for the type',
+            'single'            => true,
+            'default'           => 'wrench',
+            'sanitize_callback' => 'sanitize_text_field',
+            'show_in_rest'      => true,
+        ]);
     }
 
     /**
@@ -279,5 +307,16 @@ class FSM_Work_Order_Post_Type {
             return [];
         }
         return array_map('absint', $value);
+    }
+
+    /**
+     * Sanitize float value.
+     * Wrapper for floatval that accepts WordPress's 4-argument sanitize callback signature.
+     *
+     * @param mixed $value Value to sanitize.
+     * @return float
+     */
+    public static function sanitize_float($value) {
+        return floatval($value);
     }
 }

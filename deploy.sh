@@ -10,10 +10,11 @@ set -e
 RED='\033[0;31m'
 GREEN='\033[0;32m'
 YELLOW='\033[1;33m'
+CYAN='\033[0;36m'
 NC='\033[0m' # No Color
 
 echo -e "${GREEN}==================================================${NC}"
-echo -e "${GREEN}FSM Deployment Script${NC}"
+echo -e "${GREEN}FSM + Tracker Deployment Script${NC}"
 echo -e "${GREEN}==================================================${NC}"
 
 # Check if running in Swarm mode
@@ -44,10 +45,16 @@ if [[ "$1" == "--create-secrets" ]]; then
     echo -e "${YELLOW}Creating Docker secrets...${NC}"
     echo ""
 
+    echo -e "${CYAN}--- Database ---${NC}"
     create_secret_if_missing "fsm_db_root_password" "Enter database ROOT password"
     create_secret_if_missing "fsm_db_password" "Enter database USER password"
+
+    echo -e "${CYAN}--- Authentication ---${NC}"
     create_secret_if_missing "fsm_jwt_secret" "Enter JWT secret (min 32 chars)"
     create_secret_if_missing "fsm_github_token" "Enter GitHub Personal Access Token"
+
+    echo -e "${CYAN}--- FSM Integrations ---${NC}"
+    create_secret_if_missing "fsm_mumble_api_key" "Enter Mumble API key"
 
     echo ""
     echo -e "${GREEN}All secrets created!${NC}"
@@ -63,9 +70,17 @@ echo ""
 echo "Building WordPress image..."
 docker build -t fsm-wordpress:latest ./wordpress
 
-# Build Frontend image
-echo "Building Frontend image..."
-docker build -t fsm-frontend:latest ./frontend
+# Build FSM Frontend image
+echo "Building FSM Frontend image..."
+docker build -t fsm-frontend:latest \
+    --build-arg VITE_API_URL=https://fsm-api.steinmetz.ltd/wp-json \
+    ./frontend
+
+# Build Tracker Frontend image
+echo "Building Tracker Frontend image..."
+docker build -t tracker-frontend:latest \
+    --build-arg VITE_API_URL=https://fsm-api.steinmetz.ltd/wp-json \
+    ./tracker/frontend
 
 # Deploy stack
 echo ""
@@ -76,16 +91,19 @@ docker stack deploy -c docker-compose.yml fsm
 
 echo ""
 echo -e "${GREEN}==================================================${NC}"
-echo -e "${GREEN}FSM Deployment Complete!${NC}"
+echo -e "${GREEN}Deployment Complete!${NC}"
 echo -e "${GREEN}==================================================${NC}"
 echo ""
 echo "Services:"
-echo "  - WordPress API: https://fsm-api.steinmetz.ltd"
-echo "  - React Frontend: https://fsm.steinmetz.ltd"
+echo "  - WordPress API:      https://fsm-api.steinmetz.ltd"
+echo "  - FSM Frontend:       https://fsm.steinmetz.ltd"
+echo "  - Tracker Frontend:   https://tracker.steinmetz.ltd"
 echo ""
 echo "Monitor deployment:"
 echo "  docker service ls | grep fsm"
 echo "  docker service logs -f fsm_wordpress"
+echo "  docker service logs -f fsm_tracker-frontend"
 echo ""
 echo -e "${YELLOW}Note: First startup may take a few minutes.${NC}"
 echo -e "${YELLOW}WordPress needs to initialize and create tables.${NC}"
+echo -e "${YELLOW}Tracker tables are auto-created on first request.${NC}"

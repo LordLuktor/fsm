@@ -2,6 +2,11 @@ import { useState, useEffect, useCallback } from 'react';
 import { Link } from 'react-router-dom';
 import { workOrders, gps, ptt } from '../api/client';
 import { useAuth } from '../context/AuthContext';
+import { useGPSTracking } from '../hooks/useGPSTracking';
+import { useNotifications } from '../hooks/useNotifications';
+import { useSettings } from '../hooks/useSettings';
+import { useOfflineQueue } from '../hooks/useOfflineQueue';
+import PriorityBadge from '../components/common/PriorityBadge';
 import {
   MapPin,
   Phone,
@@ -11,22 +16,60 @@ import {
   Play,
   Package,
   Radio,
+  Bell,
+  BellOff,
+  Locate,
+  LocateOff,
+  AlertTriangle,
 } from 'lucide-react';
 import LoadingSpinner from '../components/common/LoadingSpinner';
 
 function TechnicianPage() {
   const { user, isTechnician } = useAuth();
+  const { settings, location: locationSettings, updateLocation: updateLocationSettings } = useSettings();
   const [todayOrders, setTodayOrders] = useState([]);
   const [currentOrder, setCurrentOrder] = useState(null);
   const [pttInfo, setPttInfo] = useState(null);
   const [loading, setLoading] = useState(true);
-  const [locationStatus, setLocationStatus] = useState('idle');
+  const [permissionsChecked, setPermissionsChecked] = useState(false);
+
+  // Offline queue
+  const { online, queueLength, enqueue } = useOfflineQueue();
+
+  // GPS tracking hook
+  const gpsTracking = useGPSTracking({
+    enabled: isTechnician && locationSettings.autoUpdate,
+    currentOrderId: currentOrder?.id,
+  });
+
+  // Notifications hook
+  const notifications = useNotifications({
+    enabled: isTechnician && settings.notifications.push,
+    userId: user?.id,
+  });
 
   useEffect(() => {
     if (isTechnician) {
       loadTechnicianData();
+      // Request permissions on first load
+      if (!permissionsChecked) {
+        requestPermissions();
+        setPermissionsChecked(true);
+      }
     }
   }, [isTechnician]);
+
+  const requestPermissions = async () => {
+    // Request notification permission
+    if (settings.notifications.push) {
+      await notifications.requestPermission();
+    }
+
+    // Request GPS permission and start tracking if auto-update is on
+    if (locationSettings.autoUpdate) {
+      await gpsTracking.requestPermission();
+    }
+  };
 
   const loadTechnicianData = async () => {
     try {
@@ -38,7 +81,6 @@ function TechnicianPage() {
       setTodayOrders(ordersRes.data);
       setPttInfo(pttRes.data);
 
-      // Find current in-progress order
       const inProgress = ordersRes.data.find((o) =>
         ['en_route', 'in_progress'].includes(o.status)
       );
@@ -49,41 +91,6 @@ function TechnicianPage() {
       setLoading(false);
     }
   };
-
-  const updateLocation = useCallback(async () => {
-    if (!navigator.geolocation) {
-      console.error('Geolocation not supported');
-      return;
-    }
-
-    setLocationStatus('updating');
-
-    navigator.geolocation.getCurrentPosition(
-      async (position) => {
-        try {
-          await gps.updateLocation({
-            latitude: position.coords.latitude,
-            longitude: position.coords.longitude,
-            accuracy: position.coords.accuracy,
-            altitude: position.coords.altitude,
-            heading: position.coords.heading,
-            speed: position.coords.speed,
-            work_order_id: currentOrder?.id,
-          });
-          setLocationStatus('success');
-          setTimeout(() => setLocationStatus('idle'), 2000);
-        } catch (err) {
-          console.error('Failed to update location:', err);
-          setLocationStatus('error');
-        }
-      },
-      (error) => {
-        console.error('Geolocation error:', error);
-        setLocationStatus('error');
-      },
-      { enableHighAccuracy: true, timeout: 10000 }
-    );
-  }, [currentOrder]);
 
   const handleCheckin = async (orderId) => {
     if (!navigator.geolocation) {
@@ -102,11 +109,26 @@ function TechnicianPage() {
           alert(err.response?.data?.message || 'Check-in failed');
         }
       },
-      (error) => {
-        alert('Could not get your location');
+      () => {
+        alert('Could not get your location. Please enable location services.');
       },
       { enableHighAccuracy: true }
     );
+  };
+
+  const toggleAutoTracking = () => {
+    const newValue = !locationSettings.autoUpdate;
+    updateLocationSettings({ autoUpdate: newValue });
+    if (newValue) {
+      gpsTracking.requestPermission();
+    }
+  };
+
+  const toggleNotifications = async () => {
+    if (notifications.permission !== 'granted') {
+      const granted = await notifications.requestPermission();
+      if (!granted) return;
+    }
   };
 
   const statusColors = {
@@ -116,6 +138,15 @@ function TechnicianPage() {
     in_progress: 'border-l-orange-500 bg-orange-50',
     on_hold: 'border-l-gray-500 bg-gray-50',
     completed: 'border-l-green-500 bg-green-50',
+  };
+
+  const gpsStatusText = {
+    idle: 'GPS Off',
+    requesting: 'Requesting...',
+    tracking: 'Tracking',
+    denied: 'Permission Denied',
+    unavailable: 'GPS Unavailable',
+    error: 'GPS Error',
   };
 
   if (!isTechnician) {
@@ -144,31 +175,96 @@ function TechnicianPage() {
         </p>
       </div>
 
+      {/* Permission Banners */}
+      {gpsTracking.status === 'denied' && (
+        <div className="flex items-center gap-3 p-4 bg-yellow-50 border border-yellow-200 rounded-lg">
+          <AlertTriangle className="h-5 w-5 text-yellow-600 shrink-0" />
+          <div className="flex-1">
+            <p className="text-sm font-medium text-yellow-800">GPS Permission Denied</p>
+            <p className="text-xs text-yellow-600">
+              Enable location access in your browser settings to use GPS tracking.
+            </p>
+          </div>
+        </div>
+      )}
+
+      {notifications.permission === 'denied' && (
+        <div className="flex items-center gap-3 p-4 bg-yellow-50 border border-yellow-200 rounded-lg">
+          <BellOff className="h-5 w-5 text-yellow-600 shrink-0" />
+          <div className="flex-1">
+            <p className="text-sm font-medium text-yellow-800">Notifications Blocked</p>
+            <p className="text-xs text-yellow-600">
+              Enable notifications in your browser settings to receive job alerts.
+            </p>
+          </div>
+        </div>
+      )}
+
+      {/* Status Bar */}
+      <div className="flex flex-wrap items-center gap-3">
+        <button
+          onClick={toggleAutoTracking}
+          className={`inline-flex items-center gap-2 px-3 py-1.5 rounded-full text-xs font-medium border transition-colors ${
+            gpsTracking.status === 'tracking'
+              ? 'bg-green-50 text-green-700 border-green-200'
+              : 'bg-gray-50 text-gray-600 border-gray-200 hover:bg-gray-100'
+          }`}
+        >
+          {gpsTracking.status === 'tracking' ? (
+            <Locate className="h-3.5 w-3.5" />
+          ) : (
+            <LocateOff className="h-3.5 w-3.5" />
+          )}
+          {gpsStatusText[gpsTracking.status] || 'GPS'}
+          {gpsTracking.lastUpdate && gpsTracking.status === 'tracking' && (
+            <span className="text-green-500">
+              • {gpsTracking.lastUpdate.toLocaleTimeString()}
+            </span>
+          )}
+        </button>
+
+        <span
+          className={`inline-flex items-center gap-2 px-3 py-1.5 rounded-full text-xs font-medium border ${
+            notifications.permission === 'granted'
+              ? 'bg-blue-50 text-blue-700 border-blue-200'
+              : 'bg-gray-50 text-gray-500 border-gray-200'
+          }`}
+        >
+          {notifications.permission === 'granted' ? (
+            <Bell className="h-3.5 w-3.5" />
+          ) : (
+            <BellOff className="h-3.5 w-3.5" />
+          )}
+          {notifications.permission === 'granted' ? 'Notifications On' : 'Notifications Off'}
+        </span>
+
+        {!online && (
+          <span className="inline-flex items-center gap-2 px-3 py-1.5 rounded-full text-xs font-medium border bg-red-50 text-red-700 border-red-200">
+            <AlertTriangle className="h-3.5 w-3.5" />
+            Offline{queueLength > 0 && ` (${queueLength} pending)`}
+          </span>
+        )}
+      </div>
+
       {/* Quick Actions */}
       <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
         <button
-          onClick={updateLocation}
-          disabled={locationStatus === 'updating'}
+          onClick={() => gpsTracking.updateNow()}
+          disabled={gpsTracking.status === 'requesting'}
           className={`p-4 rounded-lg border-2 flex flex-col items-center justify-center transition-colors ${
-            locationStatus === 'success'
+            gpsTracking.status === 'tracking'
               ? 'border-green-500 bg-green-50'
-              : locationStatus === 'error'
+              : gpsTracking.status === 'error' || gpsTracking.status === 'denied'
               ? 'border-red-500 bg-red-50'
               : 'border-gray-200 bg-white hover:border-primary-500'
           }`}
         >
           <Navigation
             className={`h-6 w-6 mb-2 ${
-              locationStatus === 'updating' ? 'animate-pulse text-primary-500' : 'text-gray-600'
+              gpsTracking.status === 'requesting' ? 'animate-pulse text-primary-500' : 'text-gray-600'
             }`}
           />
-          <span className="text-sm font-medium text-gray-900">
-            {locationStatus === 'updating'
-              ? 'Updating...'
-              : locationStatus === 'success'
-              ? 'Updated!'
-              : 'Update Location'}
-          </span>
+          <span className="text-sm font-medium text-gray-900">Update Location</span>
         </button>
 
         <Link
@@ -272,6 +368,8 @@ function TechnicianPage() {
                 key={order.id}
                 to={`/work-orders/${order.id}`}
                 className={`block p-4 hover:bg-gray-50 border-l-4 ${
+                  order.priority === 'urgent' ? 'border-l-red-500 bg-red-50/30' :
+                  order.priority === 'high' ? 'border-l-orange-400' :
                   statusColors[order.status] || 'border-l-gray-300'
                 }`}
               >
@@ -284,10 +382,28 @@ function TechnicianPage() {
                       <span className="text-xs px-2 py-0.5 rounded bg-gray-100 text-gray-600">
                         {order.status_label}
                       </span>
+                      <PriorityBadge priority={order.priority} size="xs" />
                     </div>
                     <p className="mt-1 font-medium text-gray-900 truncate">
                       {order.title}
                     </p>
+                    {order.types?.length > 0 && (
+                      <div className="flex gap-1 mt-1">
+                        {order.types.map((t) => (
+                          <span
+                            key={t.id}
+                            className="text-[10px] px-1.5 py-0.5 rounded font-medium border"
+                            style={{
+                              backgroundColor: `${t.color}15`,
+                              color: t.color,
+                              borderColor: `${t.color}40`,
+                            }}
+                          >
+                            {t.name}
+                          </span>
+                        ))}
+                      </div>
+                    )}
                     <p className="mt-1 text-sm text-gray-500 truncate">
                       {order.address?.street}, {order.address?.city}
                     </p>

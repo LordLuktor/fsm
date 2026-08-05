@@ -15,8 +15,19 @@ import {
   XCircle,
   Play,
   Pause,
+  Pencil,
+  FileText,
 } from 'lucide-react';
+import { Link } from 'react-router-dom';
 import LoadingSpinner from '../components/common/LoadingSpinner';
+import PriorityBadge from '../components/common/PriorityBadge';
+import { formatScheduleDate } from '../utils/dates';
+import PartsUsedSection from '../components/work-orders/PartsUsedSection';
+import TimeTracker from '../components/work-orders/TimeTracker';
+import CompletionFlow from '../components/work-orders/CompletionFlow';
+import InvoiceView from '../components/work-orders/InvoiceView';
+import MediaGallery from '../components/work-orders/MediaGallery';
+import AssignTechnicianModal from '../components/dispatch/AssignTechnicianModal';
 
 function WorkOrderDetailPage() {
   const { id } = useParams();
@@ -28,6 +39,9 @@ function WorkOrderDetailPage() {
   const [loading, setLoading] = useState(true);
   const [newNote, setNewNote] = useState('');
   const [submitting, setSubmitting] = useState(false);
+  const [showCompletionFlow, setShowCompletionFlow] = useState(false);
+  const [showInvoice, setShowInvoice] = useState(false);
+  const [showAssignModal, setShowAssignModal] = useState(false);
 
   useEffect(() => {
     loadWorkOrder();
@@ -98,7 +112,7 @@ function WorkOrderDetailPage() {
         actions.push({ status: 'in_progress', label: 'Start Work', icon: Play });
       }
       if (status === 'in_progress') {
-        actions.push({ status: 'completed', label: 'Complete', icon: CheckCircle });
+        actions.push({ status: 'completed', label: 'Complete', icon: CheckCircle, useFlow: true });
         actions.push({ status: 'on_hold', label: 'Put On Hold', icon: Pause });
       }
       if (status === 'on_hold') {
@@ -135,7 +149,10 @@ function WorkOrderDetailPage() {
   }
 
   return (
-    <div className="space-y-6">
+    <div className={`space-y-6 ${
+      order.priority === 'urgent' ? 'border-t-4 border-red-500' :
+      order.priority === 'high' ? 'border-t-4 border-orange-400' : ''
+    }`}>
       {/* Header */}
       <div className="flex items-center gap-4">
         <button
@@ -145,7 +162,7 @@ function WorkOrderDetailPage() {
           <ArrowLeft className="h-5 w-5" />
         </button>
         <div className="flex-1">
-          <div className="flex items-center gap-3">
+          <div className="flex items-center gap-3 flex-wrap">
             <span className="text-sm font-mono text-gray-500">{order.reference}</span>
             <span
               className={`inline-flex items-center px-3 py-1 rounded-full text-sm font-medium border ${
@@ -154,9 +171,36 @@ function WorkOrderDetailPage() {
             >
               {order.status_label}
             </span>
+            <PriorityBadge priority={order.priority} size="lg" />
+            {order.types?.length > 0 && (
+              <div className="flex gap-1.5">
+                {order.types.map((t) => (
+                  <span
+                    key={t.id}
+                    className="text-xs px-2 py-0.5 rounded font-medium border"
+                    style={{
+                      backgroundColor: `${t.color}15`,
+                      color: t.color,
+                      borderColor: `${t.color}40`,
+                    }}
+                  >
+                    {t.name}
+                  </span>
+                ))}
+              </div>
+            )}
           </div>
           <h1 className="text-2xl font-bold text-gray-900 mt-1">{order.title}</h1>
         </div>
+        {hasCapability('fsm_edit_work_orders') && (
+          <Link
+            to={`/work-orders/${id}/edit`}
+            className="btn btn-secondary inline-flex items-center gap-2"
+          >
+            <Pencil className="h-4 w-4" />
+            Edit
+          </Link>
+        )}
       </div>
 
       {/* Status Actions */}
@@ -165,7 +209,11 @@ function WorkOrderDetailPage() {
           {getStatusActions().map((action) => (
             <button
               key={action.status}
-              onClick={() => handleStatusChange(action.status)}
+              onClick={() =>
+                action.useFlow
+                  ? setShowCompletionFlow(true)
+                  : handleStatusChange(action.status)
+              }
               className={`btn inline-flex items-center ${
                 action.danger ? 'btn-danger' : 'btn-primary'
               }`}
@@ -174,6 +222,15 @@ function WorkOrderDetailPage() {
               {action.label}
             </button>
           ))}
+          {order.status === 'completed' && (
+            <button
+              onClick={() => setShowInvoice(true)}
+              className="btn btn-secondary inline-flex items-center"
+            >
+              <FileText className="h-4 w-4 mr-2" />
+              View Invoice
+            </button>
+          )}
         </div>
       )}
 
@@ -187,6 +244,15 @@ function WorkOrderDetailPage() {
               <p className="text-gray-600 whitespace-pre-wrap">{order.description}</p>
             </div>
           )}
+
+          {/* Parts Used */}
+          <PartsUsedSection
+            workOrderId={id}
+            workOrderStatus={order.status}
+          />
+
+          {/* Media Attachments (optional — photos/videos for records + content production) */}
+          <MediaGallery workOrderId={id} canEdit={true} />
 
           {/* Notes */}
           <div className="bg-white rounded-lg shadow">
@@ -248,6 +314,43 @@ function WorkOrderDetailPage() {
 
         {/* Sidebar */}
         <div className="space-y-6">
+          {/* Time Tracking */}
+          <TimeTracker order={order} />
+
+          {/* Assigned Technicians */}
+          {!isTechnician && (
+            <div className="bg-white rounded-lg shadow p-6">
+              <div className="flex items-center justify-between mb-4">
+                <h2 className="text-lg font-medium text-gray-900 flex items-center">
+                  <User className="h-5 w-5 mr-2" />
+                  Assigned
+                </h2>
+                {order.status !== 'completed' && order.status !== 'cancelled' && hasCapability('fsm_assign_work_orders') && (
+                  <button
+                    onClick={() => setShowAssignModal(true)}
+                    className="text-xs font-medium text-primary-600 hover:text-primary-700"
+                  >
+                    {order.technicians?.length ? 'Reassign' : 'Assign'}
+                  </button>
+                )}
+              </div>
+              {order.technicians?.length > 0 ? (
+                <div className="space-y-2">
+                  {order.technicians.map((tech) => (
+                    <div key={tech.id} className="flex items-center gap-2 text-sm">
+                      <div className="w-7 h-7 rounded-full bg-primary-100 text-primary-700 flex items-center justify-center text-xs font-semibold">
+                        {(tech.name || '?')[0]}
+                      </div>
+                      <span className="text-gray-900">{tech.name}</span>
+                    </div>
+                  ))}
+                </div>
+              ) : (
+                <p className="text-sm text-gray-400">Unassigned</p>
+              )}
+            </div>
+          )}
+
           {/* Customer Info */}
           <div className="bg-white rounded-lg shadow p-6">
             <h2 className="text-lg font-medium text-gray-900 mb-4 flex items-center">
@@ -319,7 +422,7 @@ function WorkOrderDetailPage() {
                 <span className="text-gray-500">Date:</span>
                 <span className="font-medium">
                   {order.scheduled_date
-                    ? new Date(order.scheduled_date).toLocaleDateString()
+                    ? formatScheduleDate(order.scheduled_date)
                     : 'Not scheduled'}
                 </span>
               </div>
@@ -336,14 +439,38 @@ function WorkOrderDetailPage() {
                 <span className="text-gray-500">Duration:</span>
                 <span className="font-medium">{order.estimated_duration || 60} min</span>
               </div>
-              <div className="flex justify-between">
+              <div className="flex justify-between items-center">
                 <span className="text-gray-500">Priority:</span>
-                <span className="font-medium capitalize">{order.priority}</span>
+                <PriorityBadge priority={order.priority} size="sm" />
               </div>
             </div>
           </div>
         </div>
       </div>
+
+      {/* Completion Flow Modal */}
+      <CompletionFlow
+        isOpen={showCompletionFlow}
+        onClose={() => setShowCompletionFlow(false)}
+        orderId={id}
+        onComplete={loadWorkOrder}
+      />
+
+      {/* Invoice Modal */}
+      <InvoiceView
+        isOpen={showInvoice}
+        onClose={() => setShowInvoice(false)}
+        order={order}
+      />
+
+      {/* Assign Technician Modal */}
+      <AssignTechnicianModal
+        isOpen={showAssignModal}
+        onClose={() => setShowAssignModal(false)}
+        workOrder={order}
+        selectedDate={order.scheduled_date || new Date().toISOString().split('T')[0]}
+        onSuccess={loadWorkOrder}
+      />
     </div>
   );
 }

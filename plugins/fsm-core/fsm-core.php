@@ -25,10 +25,36 @@
 defined('ABSPATH') || exit;
 
 // Plugin constants
-define('FSM_CORE_VERSION', '1.0.0');
+define('FSM_CORE_VERSION', '1.1.0');
 define('FSM_CORE_FILE', __FILE__);
 define('FSM_CORE_DIR', plugin_dir_path(__FILE__));
 define('FSM_CORE_URL', plugin_dir_url(__FILE__));
+
+
+/**
+ * Restrict REST API CORS to known origins for FSM endpoints.
+ */
+add_action( 'rest_api_init', function() {
+    add_filter( 'rest_pre_serve_request', function( $value ) {
+        $origin = get_http_origin();
+        $allowed_origins = array(
+            'https://fsm.steinmetz.ltd',
+            'https://apexweb.us',
+            'https://www.apexweb.us',
+        );
+
+        if ( $origin && in_array( $origin, $allowed_origins, true ) ) {
+            header( 'Access-Control-Allow-Origin: ' . esc_url_raw( $origin ) );
+            header( 'Access-Control-Allow-Methods: GET, POST, PUT, PATCH, DELETE, OPTIONS' );
+            header( 'Access-Control-Allow-Credentials: true' );
+            header( 'Access-Control-Allow-Headers: Authorization, X-WP-Nonce, Content-Type' );
+            header( 'Access-Control-Expose-Headers: X-WP-Total, X-WP-TotalPages, Link' );
+            header( 'Vary: Origin' );
+        }
+
+        return $value;
+    }, 15 );
+}, 15 );
 
 /**
  * Main FSM Core class.
@@ -71,7 +97,13 @@ final class FSM_Core {
         require_once FSM_CORE_DIR . 'includes/class-fsm-roles.php';
         require_once FSM_CORE_DIR . 'includes/class-fsm-post-types.php';
         require_once FSM_CORE_DIR . 'includes/class-fsm-rest-api.php';
+        require_once FSM_CORE_DIR . 'includes/class-fsm-account-api.php';
+        require_once FSM_CORE_DIR . 'includes/class-fsm-customer-portal-api.php';
+        require_once FSM_CORE_DIR . 'includes/class-fsm-domain-mapping.php';
+        require_once FSM_CORE_DIR . 'includes/class-fsm-team-api.php';
         require_once FSM_CORE_DIR . 'includes/class-fsm-utilities.php';
+        require_once FSM_CORE_DIR . 'includes/class-fsm-organizations.php';
+        require_once FSM_CORE_DIR . 'includes/class-fsm-demo-data.php';
 
         // Admin includes
         if (is_admin()) {
@@ -88,7 +120,13 @@ final class FSM_Core {
 
         add_action('init', [$this, 'load_textdomain']);
         add_action('init', [FSM_Post_Types::class, 'register'], 5);
+        add_action('init', [FSM_Organizations::class, 'register_post_type'], 5);
+        add_action('init', [FSM_Organizations::class, 'register_meta'], 10);
         add_action('rest_api_init', [FSM_REST_API::class, 'register_routes']);
+
+        // Organization filtering
+        add_action('pre_get_posts', [FSM_Organizations::class, 'filter_posts_by_organization']);
+        add_action('save_post', [FSM_Organizations::class, 'auto_set_organization'], 10, 3);
 
         // Admin notices
         add_action('admin_notices', [$this, 'admin_notices']);

@@ -27,6 +27,7 @@ class FSM_GPS_DB {
 
         $sql = "CREATE TABLE $table (
             id bigint(20) unsigned NOT NULL AUTO_INCREMENT,
+            organization_id bigint(20) unsigned NOT NULL DEFAULT 0,
             technician_id bigint(20) unsigned NOT NULL,
             latitude decimal(10,8) NOT NULL,
             longitude decimal(11,8) NOT NULL,
@@ -40,6 +41,7 @@ class FSM_GPS_DB {
             recorded_at datetime NOT NULL,
             created_at datetime DEFAULT CURRENT_TIMESTAMP,
             PRIMARY KEY (id),
+            KEY organization_id (organization_id),
             KEY technician_id (technician_id),
             KEY recorded_at (recorded_at),
             KEY work_order_id (work_order_id),
@@ -60,7 +62,14 @@ class FSM_GPS_DB {
         global $wpdb;
         $table = FSM_GPS::get_table();
 
+        // Get organization_id from technician if not provided
+        $org_id = $data['organization_id'] ?? null;
+        if (!$org_id && !empty($data['technician_id'])) {
+            $org_id = get_post_meta($data['technician_id'], '_fsm_organization_id', true);
+        }
+
         $result = $wpdb->insert($table, [
+            'organization_id' => $org_id ?: 0,
             'technician_id' => $data['technician_id'],
             'latitude' => $data['latitude'],
             'longitude' => $data['longitude'],
@@ -137,24 +146,49 @@ class FSM_GPS_DB {
     }
 
     /**
-     * Get all technicians' latest locations.
+     * Get all technicians' latest locations within organization context.
      *
+     * @param int|null $org_id Organization ID (null for current context).
      * @return array
      */
-    public static function get_all_latest() {
+    public static function get_all_latest($org_id = null) {
         global $wpdb;
         $table = FSM_GPS::get_table();
 
-        // Get latest location for each technician using a subquery
-        return $wpdb->get_results("
+        if ($org_id === null) {
+            $org_id = FSM_Organizations::get_current_context();
+        }
+
+        // Super admin viewing all orgs
+        if ($org_id === null && FSM_Organizations::is_super_admin()) {
+            return $wpdb->get_results("
+                SELECT l.*
+                FROM $table l
+                INNER JOIN (
+                    SELECT technician_id, MAX(recorded_at) as max_time
+                    FROM $table
+                    GROUP BY technician_id
+                ) latest ON l.technician_id = latest.technician_id AND l.recorded_at = latest.max_time
+            ");
+        }
+
+        // No org context for non-super admin
+        if ($org_id === null) {
+            return [];
+        }
+
+        // Filter by organization
+        return $wpdb->get_results($wpdb->prepare("
             SELECT l.*
             FROM $table l
             INNER JOIN (
                 SELECT technician_id, MAX(recorded_at) as max_time
                 FROM $table
+                WHERE organization_id = %d
                 GROUP BY technician_id
             ) latest ON l.technician_id = latest.technician_id AND l.recorded_at = latest.max_time
-        ");
+            WHERE l.organization_id = %d
+        ", $org_id, $org_id));
     }
 
     /**

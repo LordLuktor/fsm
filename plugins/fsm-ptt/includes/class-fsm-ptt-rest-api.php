@@ -166,8 +166,32 @@ class FSM_PTT_REST_API {
             return FSM_REST_API::error('create_failed', __('Failed to create channel.', 'fsm-ptt'), 500);
         }
 
-        // Attempt to create channel in Mumble
-        FSM_Mumble_Integration::create_channel($data['channel_name']);
+        // Create channel in Mumble based on type
+        $org_id = FSM_Organizations::get_current_context();
+        // Mumble integration uses static methods
+
+        if ( $org_id ) {
+            $result = null;
+            switch ( $data['channel_type'] ) {
+                case 'team':
+                case 'dispatch':
+                    $result = FSM_Mumble_Integration::create_team_channel( $org_id, $data['channel_name'] );
+                    break;
+                case 'work_order':
+                    $result = FSM_Mumble_Integration::create_work_order_channel( $org_id, $data['channel_name'] );
+                    break;
+            }
+
+            // Link Mumble channel ID if creation succeeded
+            if ( $result && ! is_wp_error( $result ) && is_array( $result ) && isset( $result['channelId'] ) ) {
+                FSM_PTT_DB::upsert_channel( array_merge( $data, [
+                    'mumble_channel_id' => $result['channelId'],
+                ] ) );
+            } elseif ( is_wp_error( $result ) ) {
+                // Mumble is down or org not provisioned — channel saved in WP DB without Mumble link
+                error_log( 'FSM PTT: Mumble channel creation failed: ' . $result->get_error_message() );
+            }
+        }
 
         $channel = FSM_PTT_DB::get_channel($data['channel_type'], $data['reference_id']);
         return rest_ensure_response(self::prepare_channel($channel));
@@ -179,24 +203,47 @@ class FSM_PTT_REST_API {
     public static function get_connection_info($request) {
         $user = wp_get_current_user();
         $tech = FSM_Utilities::get_technician_by_user_id($user->ID);
+        // Mumble integration uses static methods
+        $host = defined( 'FSM_MUMBLE_HOST' ) ? FSM_MUMBLE_HOST : 'mumble.steinmetz.ltd';
+        $port = FSM_PTT::get_mumble_port();
+
+        // Try to get real connection info from Mumble backend
+        $mumble_info = null;
+        if ( $integration ) {
+            try {
+                $mumble_info = FSM_Mumble_Integration::get_user_connection_info( $user->ID );
+            } catch ( \Exception $e ) {
+                // Mumble might be down — fall back to constructed info
+            }
+        }
+
+        $username = $mumble_info['username'] ?? get_user_meta( $user->ID, '_fsm_mumble_username', true ) ?: $user->user_login;
+        $default_channel = $mumble_info['defaultChannel'] ?? get_user_meta( $user->ID, '_fsm_mumble_default_channel', true ) ?: '';
 
         return rest_ensure_response([
             'server' => [
-                'host' => 'mumble.steinmetz.ltd',
-                'port' => FSM_PTT::get_mumble_port(),
+                'host' => $host,
+                'port' => $port,
             ],
             'user' => [
-                'username' => $user->user_login,
-                'display_name' => $user->display_name,
-                'technician_id' => $tech ? $tech->ID : null,
+                'username'       => $username,
+                'display_name'   => $user->display_name,
+                'technician_id'  => $tech ? $tech->ID : null,
+                'mumble_registered' => FSM_Mumble_Integration::is_user_registered( $user->ID ),
+                'default_channel' => $default_channel,
             ],
             'instructions' => [
-                'web_client' => 'https://mumble.steinmetz.ltd',
+                'web_client'    => "https://{$host}",
                 'native_client' => sprintf(
-                    'mumble://%s@mumble.steinmetz.ltd:%d',
-                    urlencode($user->user_login),
-                    FSM_PTT::get_mumble_port()
+                    'mumble://%s@%s:%d%s',
+                    urlencode( $username ),
+                    $host,
+                    $port,
+                    $default_channel ? '/' . urlencode( $default_channel ) : ''
                 ),
+            ],
+            'status' => [
+                'mumble_available' => FSM_Mumble_Integration::is_available(),
             ],
         ]);
     }
@@ -225,8 +272,23 @@ class FSM_PTT_REST_API {
             return FSM_REST_API::error('create_failed', __('Failed to create channel.', 'fsm-ptt'), 500);
         }
 
-        // Attempt to create channel in Mumble
-        FSM_Mumble_Integration::create_channel($channel_name);
+        // Create work order channel in Mumble
+        $org_id = FSM_Organizations::get_current_context();
+        // Mumble integration uses static methods
+
+        if ( $org_id ) {
+            $result = FSM_Mumble_Integration::create_work_order_channel( $org_id, $reference ?: (string) $work_order_id );
+            if ( $result && ! is_wp_error( $result ) && is_array( $result ) && isset( $result['channelId'] ) ) {
+                FSM_PTT_DB::upsert_channel( [
+                    'channel_name'     => $channel_name,
+                    'channel_type'     => 'work_order',
+                    'reference_id'     => $work_order_id,
+                    'mumble_channel_id' => $result['channelId'],
+                ] );
+            } elseif ( is_wp_error( $result ) ) {
+                error_log( 'FSM PTT: Mumble WO channel creation failed: ' . $result->get_error_message() );
+            }
+        }
 
         FSM_Utilities::log_activity('ptt_wo_channel_created', [
             'work_order_id' => $work_order_id,

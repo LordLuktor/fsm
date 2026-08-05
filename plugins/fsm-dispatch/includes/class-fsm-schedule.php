@@ -206,6 +206,109 @@ class FSM_Schedule {
     }
 
     /**
+     * Calculate schedule adherence status for a technician.
+     *
+     * Returns a color code indicating how on-schedule the technician is:
+     * - green:  Within the time window for the active job, or between jobs
+     * - yellow: Past the active job's scheduled end but not yet halfway through the next job's window
+     * - red:    Halfway or more through the next job's scheduled window (seriously behind)
+     *
+     * @param int $technician_id Technician post ID.
+     * @return array
+     */
+    public static function calculate_schedule_status($technician_id) {
+        $today    = current_time('Y-m-d');
+        $now      = current_time('timestamp');
+        $schedule = self::get_technician_day($technician_id, $today);
+
+        $default = [
+            'schedule_status' => 'green',
+            'minutes_over'    => 0,
+            'next_wo_start'   => null,
+        ];
+
+        if (empty($schedule['work_orders'])) {
+            return $default;
+        }
+
+        // Find the active work order (in_progress or en_route).
+        $active     = null;
+        $active_idx = null;
+        foreach ($schedule['work_orders'] as $idx => $wo) {
+            if (in_array($wo['status'], ['in_progress', 'en_route'], true)) {
+                $active     = $wo;
+                $active_idx = $idx;
+                break;
+            }
+        }
+
+        // No active WO — technician is between jobs or done for the day.
+        if (!$active) {
+            return $default;
+        }
+
+        // Calculate the scheduled end of the active WO.
+        $active_end_str = $active['time_end'];
+        if (!$active_end_str && $active['time_start']) {
+            $active_end_str = date('H:i', strtotime($active['time_start']) + ($active['duration'] * 60));
+        }
+        if (!$active_end_str) {
+            return $default; // No time data — can't calculate.
+        }
+
+        $active_end = strtotime($today . ' ' . $active_end_str);
+        $minutes_over = max(0, (int) round(($now - $active_end) / 60));
+
+        // Still within the active job's time window.
+        if ($now <= $active_end) {
+            return [
+                'schedule_status' => 'green',
+                'minutes_over'    => 0,
+                'next_wo_start'   => null,
+            ];
+        }
+
+        // Past the active job's window — find the next incomplete WO.
+        $next_wo = null;
+        for ($i = $active_idx + 1; $i < count($schedule['work_orders']); $i++) {
+            $candidate = $schedule['work_orders'][$i];
+            if (!in_array($candidate['status'], ['completed', 'cancelled'], true)) {
+                $next_wo = $candidate;
+                break;
+            }
+        }
+
+        // No next WO — over time but nothing else impacted.
+        if (!$next_wo || !$next_wo['time_start']) {
+            return [
+                'schedule_status' => 'yellow',
+                'minutes_over'    => $minutes_over,
+                'next_wo_start'   => null,
+            ];
+        }
+
+        $next_start    = strtotime($today . ' ' . $next_wo['time_start']);
+        $next_duration = (int) ($next_wo['duration'] ?: 60);
+        $next_midpoint = $next_start + ($next_duration * 60 / 2);
+
+        // Halfway or more through the next job's window — red.
+        if ($now >= $next_midpoint) {
+            return [
+                'schedule_status' => 'red',
+                'minutes_over'    => $minutes_over,
+                'next_wo_start'   => $next_wo['time_start'],
+            ];
+        }
+
+        // Behind but not yet halfway through the next job — yellow.
+        return [
+            'schedule_status' => 'yellow',
+            'minutes_over'    => $minutes_over,
+            'next_wo_start'   => $next_wo['time_start'],
+        ];
+    }
+
+    /**
      * Calculate estimated travel time between two work orders.
      * Simple estimation based on distance.
      *

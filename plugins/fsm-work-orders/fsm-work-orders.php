@@ -98,6 +98,10 @@ final class FSM_Work_Orders {
         require_once FSM_WORK_ORDERS_DIR . 'includes/class-fsm-work-order-post-type.php';
         require_once FSM_WORK_ORDERS_DIR . 'includes/class-fsm-work-order-rest-api.php';
         require_once FSM_WORK_ORDERS_DIR . 'includes/class-fsm-work-order-status.php';
+        require_once FSM_WORK_ORDERS_DIR . 'includes/class-fsm-work-order-notifications.php';
+        require_once FSM_WORK_ORDERS_DIR . 'includes/class-fsm-work-order-portal.php';
+        require_once FSM_WORK_ORDERS_DIR . 'includes/class-fsm-work-order-media-db.php';
+        require_once FSM_WORK_ORDERS_DIR . 'includes/class-fsm-work-order-media-rest.php';
 
         if (is_admin()) {
             require_once FSM_WORK_ORDERS_DIR . 'admin/class-fsm-work-order-admin.php';
@@ -113,7 +117,26 @@ final class FSM_Work_Orders {
 
         add_action('init', [$this, 'load_textdomain']);
         add_action('init', [FSM_Work_Order_Post_Type::class, 'register'], 6);
+        add_action('init', [$this, 'maybe_upgrade_media_table'], 10);
         add_action('rest_api_init', [FSM_Work_Order_REST_API::class, 'register_routes']);
+        add_action('rest_api_init', [FSM_Work_Order_Media_REST::class, 'register_routes']);
+
+        // Cascade: delete media when work order is deleted
+        add_action('before_delete_post', function($post_id) {
+            if (get_post_type($post_id) === 'fsm_work_order') {
+                FSM_Work_Order_Media_DB::delete_by_work_order($post_id);
+            }
+        });
+    }
+
+    /**
+     * Run media table migration if version option is missing or outdated.
+     */
+    public function maybe_upgrade_media_table() {
+        $installed = get_option(FSM_Work_Order_Media_DB::VERSION_OPTION);
+        if ($installed !== FSM_Work_Order_Media_DB::TABLE_VERSION) {
+            FSM_Work_Order_Media_DB::create_table();
+        }
     }
 
     /**
@@ -134,6 +157,9 @@ final class FSM_Work_Orders {
         // Register post type to flush rewrite rules
         FSM_Work_Order_Post_Type::register();
         flush_rewrite_rules();
+
+        // Create/upgrade custom tables
+        FSM_Work_Order_Media_DB::create_table();
 
         update_option('fsm_work_orders_version', FSM_WORK_ORDERS_VERSION);
     }

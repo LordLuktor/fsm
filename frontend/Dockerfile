@@ -16,7 +16,7 @@ ARG VITE_API_URL=https://fsm-api.steinmetz.ltd/wp-json
 COPY package*.json ./
 
 # Install dependencies
-RUN npm ci
+RUN npm install
 
 # Copy source
 COPY . .
@@ -33,6 +33,10 @@ COPY nginx.conf /etc/nginx/conf.d/default.conf
 
 # Copy built files
 COPY --from=builder /app/dist /usr/share/nginx/html
+
+# Host umask can leave copied static files at 660, which nginx can't read (403). Normalize.
+RUN find /usr/share/nginx/html -type d -exec chmod 755 {} \; \
+ && find /usr/share/nginx/html -type f -exec chmod 644 {} \;
 
 # Add healthcheck
 HEALTHCHECK --interval=30s --timeout=10s --retries=3 \

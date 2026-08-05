@@ -1,0 +1,578 @@
+<?php
+/**
+ * Tracker REST API - Auth, family management, member management endpoints.
+ */
+
+if ( ! defined( 'ABSPATH' ) ) {
+    exit;
+}
+
+class Tracker_REST_API {
+
+    /**
+     * Register all core REST routes.
+     */
+    public static function register_routes() {
+        $ns = TRACKER_API_NAMESPACE;
+
+        // Auth
+        register_rest_route( $ns, '/auth/register', array(
+            'methods'             => 'POST',
+            'callback'            => array( __CLASS__, 'register_user' ),
+            'permission_callback' => '__return_true',
+            'args'                => array(
+                'email'       => array( 'required' => true, 'type' => 'string', 'format' => 'email' ),
+                'password'    => array( 'required' => true, 'type' => 'string', 'minLength' => 10 ),
+                'display_name'=> array( 'required' => true, 'type' => 'string' ),
+                'family_name' => array( 'required' => true, 'type' => 'string' ),
+            ),
+        ) );
+
+        register_rest_route( $ns, '/auth/login', array(
+            'methods'             => 'POST',
+            'callback'            => array( __CLASS__, 'login_user' ),
+            'permission_callback' => '__return_true',
+            'args'                => array(
+                'email'    => array( 'required' => true, 'type' => 'string' ),
+                'password' => array( 'required' => true, 'type' => 'string' ),
+            ),
+        ) );
+
+        // Current user
+        register_rest_route( $ns, '/me', array(
+            'methods'             => 'GET',
+            'callback'            => array( __CLASS__, 'get_me' ),
+            'permission_callback' => array( __CLASS__, 'check_authenticated' ),
+        ) );
+
+        // Family
+        register_rest_route( $ns, '/family', array(
+            'methods'             => 'GET',
+            'callback'            => array( __CLASS__, 'get_family' ),
+            'permission_callback' => array( __CLASS__, 'check_tracker_access' ),
+        ) );
+
+        register_rest_route( $ns, '/family/invite', array(
+            'methods'             => 'POST',
+            'callback'            => array( __CLASS__, 'invite_member' ),
+            'permission_callback' => array( __CLASS__, 'check_manage_members' ),
+            'args'                => array(
+                'email' => array( 'required' => true, 'type' => 'string', 'format' => 'email' ),
+            ),
+        ) );
+
+        register_rest_route( $ns, '/family/invite-code', array(
+            'methods'             => 'GET',
+            'callback'            => array( __CLASS__, 'get_invite_code' ),
+            'permission_callback' => array( __CLASS__, 'check_manage_members' ),
+        ) );
+
+        register_rest_route( $ns, '/family/invite-code/regenerate', array(
+            'methods'             => 'POST',
+            'callback'            => array( __CLASS__, 'regenerate_invite_code' ),
+            'permission_callback' => array( __CLASS__, 'check_manage_members' ),
+        ) );
+
+        register_rest_route( $ns, '/family/join/(?P<code>[a-zA-Z0-9]+)', array(
+            'methods'             => 'POST',
+            'callback'            => array( __CLASS__, 'join_family' ),
+            'permission_callback' => array( __CLASS__, 'check_authenticated' ),
+            'args'                => array(
+                'code' => array( 'required' => true, 'type' => 'string' ),
+            ),
+        ) );
+
+        // Members
+        register_rest_route( $ns, '/family/members', array(
+            'methods'             => 'GET',
+            'callback'            => array( __CLASS__, 'get_members' ),
+            'permission_callback' => array( __CLASS__, 'check_tracker_access' ),
+        ) );
+
+        register_rest_route( $ns, '/family/members/(?P<id>\d+)', array(
+            array(
+                'methods'             => 'PATCH',
+                'callback'            => array( __CLASS__, 'update_member' ),
+                'permission_callback' => array( __CLASS__, 'check_manage_members' ),
+                'args'                => array(
+                    'display_name' => array( 'type' => 'string' ),
+                    'avatar_color' => array( 'type' => 'string' ),
+                    'status'       => array( 'type' => 'string', 'enum' => array( 'active', 'disabled' ) ),
+                ),
+            ),
+            array(
+                'methods'             => 'DELETE',
+                'callback'            => array( __CLASS__, 'remove_member' ),
+                'permission_callback' => array( __CLASS__, 'check_manage_members' ),
+            ),
+        ) );
+    }
+
+    // =========================================================================
+    // Permission Callbacks
+    // =========================================================================
+
+    public static function check_authenticated( $request ) {
+        return is_user_logged_in();
+    }
+
+    public static function check_tracker_access( $request ) {
+        return current_user_can( 'tracker_access' );
+    }
+
+    public static function check_manage_members( $request ) {
+        return current_user_can( 'tracker_manage_members' );
+    }
+
+    // =========================================================================
+    // Auth Endpoints
+    // =========================================================================
+
+    /**
+     * POST /auth/register - Create account + family (self-registration).
+     */
+    public static function register_user( $request ) {
+        // Rate limit: max 3 registration attempts per IP per hour.
+        $ip = self::get_real_ip();
+        $rate_key = 'tracker_reg_' . md5( $ip );
+        $attempts = (int) get_transient( $rate_key );
+        if ( $attempts >= 3 ) {
+            return new WP_Error( 'rate_limited', 'Too many registration attempts. Please try again later.', array( 'status' => 429 ) );
+        }
+        set_transient( $rate_key, $attempts + 1, HOUR_IN_SECONDS );
+
+        $email        = sanitize_email( $request->get_param( 'email' ) );
+        $password     = $request->get_param( 'password' );
+        $display_name = sanitize_text_field( $request->get_param( 'display_name' ) );
+        $family_name  = sanitize_text_field( $request->get_param( 'family_name' ) );
+
+        // Check email not taken
+        if ( email_exists( $email ) ) {
+            return new WP_Error( 'email_exists', 'An account with this email already exists.', array( 'status' => 409 ) );
+        }
+
+        // Create WordPress user
+        $username = sanitize_user( strtolower( explode( '@', $email )[0] ) . '_' . wp_rand( 100, 999 ) );
+        $user_id  = wp_create_user( $username, $password, $email );
+        if ( is_wp_error( $user_id ) ) {
+            return new WP_Error( 'registration_failed', $user_id->get_error_message(), array( 'status' => 500 ) );
+        }
+
+        wp_update_user( array(
+            'ID'           => $user_id,
+            'display_name' => $display_name,
+            'first_name'   => explode( ' ', $display_name )[0],
+        ) );
+
+        // Create family
+        $family_id = Tracker_Families::create_family( $family_name, $user_id );
+        if ( is_wp_error( $family_id ) ) {
+            wp_delete_user( $user_id );
+            return new WP_Error( 'family_creation_failed', $family_id->get_error_message(), array( 'status' => 500 ) );
+        }
+
+        // Create owner member
+        $member_id = Tracker_Members::create_member( $user_id, $family_id, $display_name, 'owner' );
+        if ( is_wp_error( $member_id ) ) {
+            wp_delete_user( $user_id );
+            wp_delete_post( $family_id, true );
+            return new WP_Error( 'member_creation_failed', $member_id->get_error_message(), array( 'status' => 500 ) );
+        }
+
+        // Generate JWT token
+        $token = self::generate_jwt_token( $user_id );
+        if ( is_wp_error( $token ) ) {
+            return $token;
+        }
+
+        return rest_ensure_response( array(
+            'token'   => $token,
+            'user'    => self::format_user( $user_id ),
+            'family'  => Tracker_Core::get_family( $family_id ),
+            'member'  => Tracker_Core::get_member( $member_id ),
+        ) );
+    }
+
+    /**
+     * POST /auth/login - Authenticate and get JWT token.
+     */
+    public static function login_user( $request ) {
+        // Rate limit: max 10 login attempts per IP per 15 minutes.
+        $ip = self::get_real_ip();
+        $rate_key = 'tracker_login_' . md5( $ip );
+        $attempts = (int) get_transient( $rate_key );
+        if ( $attempts >= 10 ) {
+            return new WP_Error( 'rate_limited', 'Too many login attempts. Please try again later.', array( 'status' => 429 ) );
+        }
+        set_transient( $rate_key, $attempts + 1, 15 * MINUTE_IN_SECONDS );
+
+        $email    = sanitize_text_field( $request->get_param( 'email' ) );
+        $password = $request->get_param( 'password' );
+
+        // Try to authenticate
+        $user = wp_authenticate( $email, $password );
+        if ( is_wp_error( $user ) ) {
+            // Try by email if username auth failed
+            $user_obj = get_user_by( 'email', $email );
+            if ( $user_obj ) {
+                $user = wp_authenticate( $user_obj->user_login, $password );
+            }
+        }
+
+        if ( is_wp_error( $user ) ) {
+            return new WP_Error( 'invalid_credentials', 'Invalid email or password.', array( 'status' => 401 ) );
+        }
+
+        // Check user has tracker access
+        if ( ! user_can( $user->ID, 'tracker_access' ) ) {
+            return new WP_Error( 'no_access', 'This account does not have tracker access.', array( 'status' => 403 ) );
+        }
+
+        $token = self::generate_jwt_token( $user->ID );
+        if ( is_wp_error( $token ) ) {
+            return $token;
+        }
+
+        $member    = Tracker_Core::get_member_by_user_id( $user->ID );
+        $family_id = $member ? $member['family_id'] : 0;
+        $family    = $family_id ? Tracker_Core::get_family( $family_id ) : null;
+
+        return rest_ensure_response( array(
+            'token'  => $token,
+            'user'   => self::format_user( $user->ID ),
+            'family' => $family,
+            'member' => $member,
+        ) );
+    }
+
+    // =========================================================================
+    // User Endpoints
+    // =========================================================================
+
+    /**
+     * GET /me - Current user info.
+     */
+    public static function get_me( $request ) {
+        $user_id   = get_current_user_id();
+        $member    = Tracker_Core::get_member_by_user_id( $user_id );
+        $family_id = $member ? $member['family_id'] : 0;
+        $family    = $family_id ? Tracker_Core::get_family( $family_id ) : null;
+
+        return rest_ensure_response( array(
+            'user'   => self::format_user( $user_id ),
+            'family' => $family,
+            'member' => $member,
+        ) );
+    }
+
+    // =========================================================================
+    // Family Endpoints
+    // =========================================================================
+
+    /**
+     * GET /family - Family details with members.
+     */
+    public static function get_family( $request ) {
+        $user_id   = get_current_user_id();
+        $family_id = Tracker_Core::get_user_family_id( $user_id );
+
+        if ( ! $family_id ) {
+            return new WP_Error( 'no_family', 'You are not a member of any family.', array( 'status' => 404 ) );
+        }
+
+        $family  = Tracker_Core::get_family( $family_id );
+        $members = Tracker_Core::get_family_members( $family_id );
+
+        return rest_ensure_response( array(
+            'family'  => $family,
+            'members' => $members,
+        ) );
+    }
+
+    /**
+     * POST /family/invite - Send an invite (creates user if needed, generates invite code).
+     */
+    public static function invite_member( $request ) {
+        $user_id   = get_current_user_id();
+        $family_id = Tracker_Core::get_user_family_id( $user_id );
+        $email     = sanitize_email( $request->get_param( 'email' ) );
+
+        if ( ! $family_id ) {
+            return new WP_Error( 'no_family', 'You are not a member of any family.', array( 'status' => 404 ) );
+        }
+
+        // Check member limit
+        $family  = Tracker_Core::get_family( $family_id );
+        $members = Tracker_Core::get_family_members( $family_id );
+        if ( count( $members ) >= $family['max_members'] ) {
+            return new WP_Error( 'family_full', 'Family has reached its member limit. Upgrade to add more members.', array( 'status' => 403 ) );
+        }
+
+        // Check if user with this email already exists and is already in a family
+        $existing_user = get_user_by( 'email', $email );
+        if ( $existing_user ) {
+            $existing_member = Tracker_Core::get_member_by_user_id( $existing_user->ID );
+            if ( $existing_member ) {
+                return new WP_Error( 'already_member', 'This user already belongs to a family.', array( 'status' => 409 ) );
+            }
+        }
+
+        // Get invite code
+        $code = get_post_meta( $family_id, '_tracker_invite_code', true );
+        if ( ! $code ) {
+            $code = Tracker_Families::regenerate_invite_code( $family_id );
+        }
+
+        // In a real deployment, send an email here with the invite link
+        // For now, return the code/link
+        return rest_ensure_response( array(
+            'invite_code' => $code,
+            'invite_url'  => home_url( '/join/' . $code ),
+            'email'       => $email,
+            'message'     => 'Invite link generated. Share it with ' . $email,
+        ) );
+    }
+
+    /**
+     * GET /family/invite-code - Get the current invite code.
+     */
+    public static function get_invite_code( $request ) {
+        $user_id   = get_current_user_id();
+        $family_id = Tracker_Core::get_user_family_id( $user_id );
+
+        if ( ! $family_id ) {
+            return new WP_Error( 'no_family', 'No family found.', array( 'status' => 404 ) );
+        }
+
+        $code = get_post_meta( $family_id, '_tracker_invite_code', true );
+        if ( ! $code ) {
+            $code = Tracker_Families::regenerate_invite_code( $family_id );
+        }
+
+        return rest_ensure_response( array(
+            'invite_code' => $code,
+            'invite_url'  => home_url( '/join/' . $code ),
+        ) );
+    }
+
+    /**
+     * POST /family/invite-code/regenerate - Generate a new invite code.
+     */
+    public static function regenerate_invite_code( $request ) {
+        $user_id   = get_current_user_id();
+        $family_id = Tracker_Core::get_user_family_id( $user_id );
+
+        if ( ! $family_id ) {
+            return new WP_Error( 'no_family', 'No family found.', array( 'status' => 404 ) );
+        }
+
+        $code = Tracker_Families::regenerate_invite_code( $family_id );
+
+        return rest_ensure_response( array(
+            'invite_code' => $code,
+            'invite_url'  => home_url( '/join/' . $code ),
+        ) );
+    }
+
+    /**
+     * POST /family/join/:code - Join a family via invite code.
+     */
+    public static function join_family( $request ) {
+        $user_id = get_current_user_id();
+        $code    = sanitize_text_field( $request->get_param( 'code' ) );
+
+        // Check user isn't already in a family
+        $existing = Tracker_Core::get_member_by_user_id( $user_id );
+        if ( $existing ) {
+            return new WP_Error( 'already_member', 'You already belong to a family.', array( 'status' => 409 ) );
+        }
+
+        // Find family by invite code
+        $family = Tracker_Families::get_family_by_invite_code( $code );
+        if ( ! $family ) {
+            return new WP_Error( 'invalid_code', 'Invalid or expired invite code.', array( 'status' => 404 ) );
+        }
+
+        $user = get_user_by( 'id', $user_id );
+        $member_id = Tracker_Members::create_member( $user_id, $family['id'], $user->display_name, 'member' );
+
+        if ( is_wp_error( $member_id ) ) {
+            return new WP_Error( 'join_failed', $member_id->get_error_message(), array( 'status' => 500 ) );
+        }
+
+        /**
+         * Fires when a new member joins a family.
+         * Used by tracker-ptt to auto-register members in Mumble for Ultimate families.
+         *
+         * @param int $user_id   The WordPress user ID of the new member.
+         * @param int $family_id The family post ID.
+         */
+        do_action( 'tracker_member_added', $user_id, $family['id'] );
+
+        return rest_ensure_response( array(
+            'family' => Tracker_Core::get_family( $family['id'] ),
+            'member' => Tracker_Core::get_member( $member_id ),
+        ) );
+    }
+
+    // =========================================================================
+    // Member Endpoints
+    // =========================================================================
+
+    /**
+     * GET /family/members - List all family members.
+     */
+    public static function get_members( $request ) {
+        $user_id   = get_current_user_id();
+        $family_id = Tracker_Core::get_user_family_id( $user_id );
+
+        if ( ! $family_id ) {
+            return new WP_Error( 'no_family', 'No family found.', array( 'status' => 404 ) );
+        }
+
+        $members = Tracker_Core::get_family_members( $family_id );
+
+        return rest_ensure_response( $members );
+    }
+
+    /**
+     * PATCH /family/members/:id - Update a member.
+     */
+    public static function update_member( $request ) {
+        $member_id = (int) $request->get_param( 'id' );
+        $member    = Tracker_Core::get_member( $member_id );
+
+        if ( ! $member ) {
+            return new WP_Error( 'not_found', 'Member not found.', array( 'status' => 404 ) );
+        }
+
+        // Ensure member belongs to the same family
+        $user_id   = get_current_user_id();
+        $family_id = Tracker_Core::get_user_family_id( $user_id );
+        if ( $member['family_id'] !== $family_id ) {
+            return new WP_Error( 'forbidden', 'Member does not belong to your family.', array( 'status' => 403 ) );
+        }
+
+        $data = array();
+        foreach ( array( 'display_name', 'avatar_color', 'status' ) as $field ) {
+            $val = $request->get_param( $field );
+            if ( null !== $val ) {
+                $data[ $field ] = $val;
+            }
+        }
+
+        $updated = Tracker_Members::update_member( $member_id, $data );
+        return rest_ensure_response( $updated );
+    }
+
+    /**
+     * DELETE /family/members/:id - Remove a member.
+     */
+    public static function remove_member( $request ) {
+        $member_id = (int) $request->get_param( 'id' );
+        $member    = Tracker_Core::get_member( $member_id );
+
+        if ( ! $member ) {
+            return new WP_Error( 'not_found', 'Member not found.', array( 'status' => 404 ) );
+        }
+
+        // Ensure member belongs to the same family
+        $user_id   = get_current_user_id();
+        $family_id = Tracker_Core::get_user_family_id( $user_id );
+        if ( $member['family_id'] !== $family_id ) {
+            return new WP_Error( 'forbidden', 'Member does not belong to your family.', array( 'status' => 403 ) );
+        }
+
+        // Cannot remove the owner
+        if ( 'owner' === $member['role'] ) {
+            return new WP_Error( 'cannot_remove_owner', 'Cannot remove the family owner.', array( 'status' => 403 ) );
+        }
+
+        Tracker_Members::remove_member( $member_id );
+
+        return rest_ensure_response( array( 'deleted' => true, 'id' => $member_id ) );
+    }
+
+    // =========================================================================
+    // Helpers
+    // =========================================================================
+
+    /**
+     * Get the real client IP, accounting for reverse proxies.
+     */
+    private static function get_real_ip() {
+        $headers = array( 'HTTP_X_FORWARDED_FOR', 'HTTP_X_REAL_IP', 'HTTP_CF_CONNECTING_IP' );
+        foreach ( $headers as $header ) {
+            if ( ! empty( $_SERVER[ $header ] ) ) {
+                $ips = explode( ',', sanitize_text_field( $_SERVER[ $header ] ) );
+                $ip  = trim( $ips[0] );
+                if ( filter_var( $ip, FILTER_VALIDATE_IP, FILTER_FLAG_NO_PRIV_RANGE | FILTER_FLAG_NO_RES_RANGE ) ) {
+                    return $ip;
+                }
+            }
+        }
+        return sanitize_text_field( $_SERVER['REMOTE_ADDR'] ?? '0.0.0.0' );
+    }
+
+    /**
+     * Generate a JWT token for a user.
+     * Uses the same JWT plugin as FSM.
+     */
+    private static function generate_jwt_token( $user_id ) {
+        if ( ! defined( 'JWT_AUTH_SECRET_KEY' ) || empty( JWT_AUTH_SECRET_KEY ) ) {
+            return new \WP_Error(
+                'auth_unavailable',
+                'Authentication service unavailable.',
+                array( 'status' => 500 )
+            );
+        }
+
+        if ( ! class_exists( 'Firebase\JWT\JWT' ) ) {
+            return new \WP_Error(
+                'auth_unavailable',
+                'Authentication service unavailable.',
+                array( 'status' => 500 )
+            );
+        }
+
+        $secret = JWT_AUTH_SECRET_KEY;
+        $issued = time();
+        $expire = $issued + ( DAY_IN_SECONDS * 7 );
+
+        $payload = array(
+            'iss'  => get_bloginfo( 'url' ),
+            'iat'  => $issued,
+            'nbf'  => $issued,
+            'exp'  => $expire,
+            'aud'  => 'tracker',
+            'data' => array(
+                'user' => array(
+                    'id' => $user_id,
+                ),
+            ),
+        );
+
+        return \Firebase\JWT\JWT::encode( $payload, $secret, 'HS256' );
+    }
+
+    /**
+     * Format user data for response.
+     */
+    private static function format_user( $user_id ) {
+        $user = get_user_by( 'id', $user_id );
+        if ( ! $user ) {
+            return null;
+        }
+
+        return array(
+            'id'           => $user->ID,
+            'email'        => $user->user_email,
+            'display_name' => $user->display_name,
+            'first_name'   => $user->first_name,
+            'last_name'    => $user->last_name,
+            'roles'        => $user->roles,
+            'is_owner'     => in_array( 'tracker_owner', $user->roles, true ),
+            'is_member'    => in_array( 'tracker_member', $user->roles, true ),
+        );
+    }
+}

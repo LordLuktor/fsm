@@ -8,7 +8,7 @@
 # - WP-CLI for management
 # =============================================================================
 
-FROM wordpress:latest
+FROM wordpress:6.7-php8.3-apache
 
 # Install required packages
 RUN apt-get update && apt-get install -y \
@@ -27,7 +27,7 @@ RUN mkdir -p /var/www/html/wp-content/plugins
 
 # Download and install Git Updater plugin
 # https://github.com/afragen/git-updater
-RUN curl -L https://github.com/afragen/git-updater/releases/latest/download/git-updater.zip -o /tmp/git-updater.zip \
+RUN curl -fsSL $(curl -s https://api.github.com/repos/afragen/git-updater/releases/latest | grep -oP '"browser_download_url": "\K[^"]+\.zip') -o /tmp/git-updater.zip \
     && unzip /tmp/git-updater.zip -d /var/www/html/wp-content/plugins/ \
     && rm /tmp/git-updater.zip
 
@@ -43,17 +43,22 @@ RUN curl -L https://downloads.wordpress.org/plugin/jwt-authentication-for-wp-res
     && unzip /tmp/jwt-auth.zip -d /var/www/html/wp-content/plugins/ \
     && rm /tmp/jwt-auth.zip
 
+# Download Paid Memberships Pro to staging dir (copied to volume at startup)
+# https://wordpress.org/plugins/paid-memberships-pro/
+RUN mkdir -p /opt/pmpro-staging \
+    && curl -L https://downloads.wordpress.org/plugin/paid-memberships-pro.latest-stable.zip -o /tmp/pmpro.zip \
+    && unzip /tmp/pmpro.zip -d /opt/pmpro-staging/ \
+    && rm /tmp/pmpro.zip
+
 # Download and install Application Passwords (built into WP 5.6+, but plugin provides admin UI)
 # Skip - built into WordPress 5.6+
 
-# Create mu-plugins directory for must-use plugins
-RUN mkdir -p /var/www/html/wp-content/mu-plugins
-
-# Add FSM loader mu-plugin to auto-load FSM plugins
-COPY mu-fsm-loader.php /var/www/html/wp-content/mu-plugins/
-
-# Add headless mode configuration
-COPY headless-mode.php /var/www/html/wp-content/mu-plugins/
+# Stage mu-plugins outside the volume (copied at startup)
+RUN mkdir -p /opt/mu-plugins-staging
+COPY mu-fsm-loader.php /opt/mu-plugins-staging/
+COPY headless-mode.php /opt/mu-plugins-staging/
+COPY security-hardening.php /opt/mu-plugins-staging/
+COPY fsm-smtp.php /opt/mu-plugins-staging/
 
 # Custom PHP configuration for larger uploads and better performance
 RUN { \
@@ -63,6 +68,58 @@ RUN { \
     echo 'max_execution_time = 300'; \
     echo 'max_input_vars = 3000'; \
 } > /usr/local/etc/php/conf.d/fsm-custom.ini
+
+# Apache security: block PHP execution in directories that should never run PHP
+RUN { \
+    echo '<Directory /var/www/html/wp-content/uploads>'; \
+    echo '    <FilesMatch "\\.php$">'; \
+    echo '        Require all denied'; \
+    echo '    </FilesMatch>'; \
+    echo '</Directory>'; \
+    echo '<Directory /var/www/html/wp-content/upgrade>'; \
+    echo '    <FilesMatch "\\.php$">'; \
+    echo '        Require all denied'; \
+    echo '    </FilesMatch>'; \
+    echo '</Directory>'; \
+    echo '<Directory /var/www/html/wp-includes>'; \
+    echo '    <FilesMatch "\\.php$">'; \
+    echo '        Require all denied'; \
+    echo '    </FilesMatch>'; \
+    echo '    # Allow wp-includes/ms-files.php for multisite'; \
+    echo '</Directory>'; \
+    echo '<Directory /var/www/html/wp-admin/css>'; \
+    echo '    <FilesMatch "\\.php$">'; \
+    echo '        Require all denied'; \
+    echo '    </FilesMatch>'; \
+    echo '</Directory>'; \
+    echo '<Directory /var/www/html/wp-admin/js>'; \
+    echo '    <FilesMatch "\\.php$">'; \
+    echo '        Require all denied'; \
+    echo '    </FilesMatch>'; \
+    echo '</Directory>'; \
+    echo '<Directory /var/www/html/wp-admin/images>'; \
+    echo '    <FilesMatch "\\.php$">'; \
+    echo '        Require all denied'; \
+    echo '    </FilesMatch>'; \
+    echo '</Directory>'; \
+    echo '<Directory /var/www/html/wp-admin/maint>'; \
+    echo '    <FilesMatch "\\.php$">'; \
+    echo '        Require all denied'; \
+    echo '    </FilesMatch>'; \
+    echo '</Directory>'; \
+    echo '<Directory /var/www/html/wp-admin/network>'; \
+    echo '    # Allow only legitimate WP network admin files'; \
+    echo '    <FilesMatch "^(?!admin|edit|index|plugins|settings|setup|site|sites|theme|themes|update|upgrade|user|users).*\\.php$">'; \
+    echo '        Require all denied'; \
+    echo '    </FilesMatch>'; \
+    echo '</Directory>'; \
+    echo '<Directory /var/www/html/images>'; \
+    echo '    <FilesMatch "\\.php$">'; \
+    echo '        Require all denied'; \
+    echo '    </FilesMatch>'; \
+    echo '</Directory>'; \
+} > /etc/apache2/conf-available/fsm-security.conf \
+    && a2enconf fsm-security
 
 # Set proper permissions
 RUN chown -R www-data:www-data /var/www/html/wp-content

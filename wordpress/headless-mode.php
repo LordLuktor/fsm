@@ -69,12 +69,15 @@ function fsm_cors_headers() {
         return;
     }
 
-    // Allow the React frontend origin
+    // Allow the React frontend origins
     $allowed_origins = [
         'https://fsm.steinmetz.ltd',
-        'http://localhost:5173', // Vite dev server
-        'http://localhost:3000', // Alternative dev server
+        'https://tracker.steinmetz.ltd',
     ];
+    if (defined('WP_DEBUG') && WP_DEBUG) {
+        $allowed_origins[] = 'http://localhost:5173'; // Vite dev server
+        $allowed_origins[] = 'http://localhost:3000'; // Alternative dev server
+    }
 
     $origin = isset($_SERVER['HTTP_ORIGIN']) ? $_SERVER['HTTP_ORIGIN'] : '';
 

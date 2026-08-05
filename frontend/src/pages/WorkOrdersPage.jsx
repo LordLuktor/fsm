@@ -1,5 +1,5 @@
 import { useState, useEffect } from 'react';
-import { Link } from 'react-router-dom';
+import { Link, useNavigate } from 'react-router-dom';
 import { workOrders } from '../api/client';
 import { useAuth } from '../context/AuthContext';
 import {
@@ -8,11 +8,13 @@ import {
   Filter,
   ChevronLeft,
   ChevronRight,
-  AlertTriangle,
 } from 'lucide-react';
 import LoadingSpinner from '../components/common/LoadingSpinner';
+import PriorityBadge from '../components/common/PriorityBadge';
+import { formatScheduleDate } from '../utils/dates';
 
 function WorkOrdersPage() {
+  const navigate = useNavigate();
   const { hasCapability, isTechnician } = useAuth();
   const [orders, setOrders] = useState([]);
   const [loading, setLoading] = useState(true);
@@ -148,27 +150,50 @@ function WorkOrdersPage() {
                       Status
                     </th>
                     <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
-                      Scheduled
+                      Priority
                     </th>
                     <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
-                      Priority
+                      Scheduled
                     </th>
                   </tr>
                 </thead>
                 <tbody className="bg-white divide-y divide-gray-200">
                   {orders.map((order) => (
-                    <tr key={order.id} className="hover:bg-gray-50">
+                    <tr
+                      key={order.id}
+                      onClick={() => navigate(`/work-orders/${order.id}`)}
+                      className={`hover:bg-gray-50 cursor-pointer transition-colors ${
+                        order.priority === 'urgent' ? 'border-l-4 border-l-red-500 bg-red-50/30' :
+                        order.priority === 'high' ? 'border-l-4 border-l-orange-400' : ''
+                      }`}
+                    >
                       <td className="px-6 py-4 whitespace-nowrap">
-                        <Link
-                          to={`/work-orders/${order.id}`}
-                          className="text-sm font-mono text-primary-600 hover:text-primary-700"
-                        >
+                        <span className="text-sm font-mono text-primary-600">
                           {order.reference}
-                        </Link>
+                        </span>
                       </td>
                       <td className="px-6 py-4">
-                        <div className="text-sm font-medium text-gray-900 truncate max-w-xs">
-                          {order.title}
+                        <div className="flex items-center gap-2">
+                          <span className="text-sm font-medium text-gray-900 truncate max-w-xs">
+                            {order.title}
+                          </span>
+                          {order.types?.length > 0 && (
+                            <div className="flex gap-1">
+                              {order.types.map((t) => (
+                                <span
+                                  key={t.id}
+                                  className="text-[10px] px-1.5 py-0.5 rounded font-medium border"
+                                  style={{
+                                    backgroundColor: `${t.color}15`,
+                                    color: t.color,
+                                    borderColor: `${t.color}40`,
+                                  }}
+                                >
+                                  {t.name}
+                                </span>
+                              ))}
+                            </div>
+                          )}
                         </div>
                         <div className="text-sm text-gray-500">
                           {order.customer?.name}
@@ -183,10 +208,13 @@ function WorkOrdersPage() {
                           {order.status_label}
                         </span>
                       </td>
+                      <td className="px-6 py-4 whitespace-nowrap">
+                        <PriorityBadge priority={order.priority} size="sm" />
+                      </td>
                       <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-500">
                         {order.scheduled_date ? (
                           <>
-                            {new Date(order.scheduled_date).toLocaleDateString()}
+                            {formatScheduleDate(order.scheduled_date)}
                             {order.scheduled_time_start && (
                               <span className="ml-1">{order.scheduled_time_start}</span>
                             )}
@@ -194,18 +222,6 @@ function WorkOrdersPage() {
                         ) : (
                           <span className="text-gray-400">Unscheduled</span>
                         )}
-                      </td>
-                      <td className="px-6 py-4 whitespace-nowrap">
-                        <span
-                          className={`text-sm font-medium flex items-center ${
-                            priorityColors[order.priority]
-                          }`}
-                        >
-                          {order.priority === 'urgent' && (
-                            <AlertTriangle className="h-4 w-4 mr-1" />
-                          )}
-                          {order.priority.charAt(0).toUpperCase() + order.priority.slice(1)}
-                        </span>
                       </td>
                     </tr>
                   ))}

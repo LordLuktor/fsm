@@ -1,0 +1,10 @@
+{
+  "name": "Steinmetz FSM — Field Service Management",
+  "short_name": "Steinmetz FSM",
+  "description": "Scheduling, dispatch, work orders, GPS tracking, inventory, and invoicing for service businesses.",
+  "start_url": "/",
+  "display": "standalone",
+  "background_color": "#0b1220",
+  "theme_color": "#1e3a8a",
+  "icons": [ { "src": "/favicon.svg", "sizes": "any", "type": "image/svg+xml" } ]
+}

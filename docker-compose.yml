@@ -39,10 +39,12 @@ services:
           - node.role == manager
       labels:
         - "io.portainer.stack=fsm"
+      resources:
+        limits:
+          memory: 512M
       restart_policy:
-        condition: on-failure
+        condition: any
         delay: 5s
-        max_attempts: 3
     healthcheck:
       test: ["CMD", "healthcheck.sh", "--connect", "--innodb_initialized"]
       interval: 30s
@@ -55,9 +57,14 @@ services:
   # ---------------------------------------------------------------------------
   redis:
     image: redis:7-alpine
-    command: redis-server --appendonly yes --maxmemory 128mb --maxmemory-policy allkeys-lru
+    command: >-
+      sh -c 'REDIS_PASS=$$(cat /run/secrets/redis_password) &&
+      redis-server --appendonly yes --maxmemory 128mb
+      --maxmemory-policy allkeys-lru --requirepass "$$REDIS_PASS"'
     volumes:
       - redis_data:/data
+    secrets:
+      - redis_password
     networks:
       - fsm_internal
     deploy:
@@ -65,10 +72,14 @@ services:
       replicas: 1
       labels:
         - "io.portainer.stack=fsm"
+      resources:
+        limits:
+          memory: 192M
       restart_policy:
-        condition: on-failure
+        condition: any
+        delay: 5s
     healthcheck:
-      test: ["CMD", "redis-cli", "ping"]
+      test: ["CMD-SHELL", "redis-cli -a $$(cat /run/secrets/redis_password) ping | grep -q PONG"]
       interval: 30s
       timeout: 10s
       retries: 3
@@ -87,6 +98,12 @@ services:
     volumes:
       - wordpress_data:/var/www/html
       - ./plugins:/var/www/html/wp-content/plugins/fsm:ro
+      - ./plugins/tracker-core:/var/www/html/wp-content/plugins/tracker-core:ro
+      - ./plugins/tracker-gps:/var/www/html/wp-content/plugins/tracker-gps:ro
+      - ./plugins/tracker-geofence:/var/www/html/wp-content/plugins/tracker-geofence:ro
+      - ./plugins/tracker-sharing:/var/www/html/wp-content/plugins/tracker-sharing:ro
+      - ./plugins/tracker-subscription:/var/www/html/wp-content/plugins/tracker-subscription:ro
+      - ./plugins/tracker-ptt:/var/www/html/wp-content/plugins/tracker-ptt:ro
       - wordpress_uploads:/var/www/html/wp-content/uploads
     environment:
       WORDPRESS_DB_HOST: db:3306
@@ -107,10 +124,12 @@ services:
         define('WP_REDIS_PORT', 6379);
         define('WP_REDIS_PREFIX', 'fsm_');
         define('WP_REDIS_DATABASE', 0);
+        define('WP_REDIS_PASSWORD', is_readable('/run/secrets/redis_password') ? trim(file_get_contents('/run/secrets/redis_password')) : (getenv('REDIS_PASSWORD') ?: ''));
 
         /* Security hardening */
         define('DISALLOW_FILE_EDIT', true);
         define('WP_AUTO_UPDATE_CORE', false);
+        define('FS_METHOD', 'direct');
 
         /* JWT Authentication */
         define('JWT_AUTH_SECRET_KEY', getenv('JWT_SECRET'));
@@ -122,16 +141,36 @@ services:
         /* Mumble Integration */
         define('FSM_MUMBLE_HOST', 'mumble_mumble-server');
         define('FSM_MUMBLE_PORT', 64738);
+        define('FSM_MUMBLE_API_URL', 'http://mumble_backend:3001/api/fsm');
+        define('FSM_MUMBLE_API_KEY', getenv('FSM_MUMBLE_API_KEY'));
+
+        /* Tracker (Personal GPS Tracker) */
+        define('TRACKER_MUMBLE_API_URL', 'http://mumble_backend:3001/api/tracker');
+        define('TRACKER_STRIPE_ULTIMATE_PRICE_ID', getenv('TRACKER_STRIPE_ULTIMATE_PRICE_ID'));
+        define('TRACKER_FRONTEND_URL', 'https://tracker.steinmetz.ltd');
 
         /* Debug (disable in production) */
         define('WP_DEBUG', false);
         define('WP_DEBUG_LOG', false);
       JWT_SECRET_FILE: /run/secrets/jwt_secret
       GITHUB_ACCESS_TOKEN_FILE: /run/secrets/github_token
+      FSM_MUMBLE_API_KEY_FILE: /run/secrets/fsm_mumble_api_key
+      TRACKER_STRIPE_ULTIMATE_PRICE_ID: ${TRACKER_STRIPE_ULTIMATE_PRICE_ID:-price_placeholder}
+      REDIS_PASSWORD_FILE: /run/secrets/redis_password
+      SMTP_PASSWORD_FILE: /run/secrets/smtp_password
+      SMTP_HOST: mail.supremecluster.com
+      SMTP_PORT: "465"
+      SMTP_USER: admin@steinmetz.ltd
+      SMTP_FROM_NAME: Steinmetz FSM
+      SMTP_FROM_EMAIL: admin@steinmetz.ltd
+      SMTP_ENCRYPTION: ssl
     secrets:
       - db_password
       - jwt_secret
       - github_token
+      - fsm_mumble_api_key
+      - redis_password
+      - smtp_password
     networks:
       - fsm_internal
       - traefik-public
@@ -161,13 +200,25 @@ services:
         # CORS middleware for API
         - "traefik.http.middlewares.fsm-cors.headers.accesscontrolallowmethods=GET,OPTIONS,PUT,POST,DELETE,PATCH"
         - "traefik.http.middlewares.fsm-cors.headers.accesscontrolallowheaders=Authorization,Content-Type,X-WP-Nonce"
-        - "traefik.http.middlewares.fsm-cors.headers.accesscontrolalloworiginlist=https://fsm.steinmetz.ltd"
+        - "traefik.http.middlewares.fsm-cors.headers.accesscontrolalloworiginlist=https://fsm.steinmetz.ltd,https://tracker.steinmetz.ltd"
         - "traefik.http.middlewares.fsm-cors.headers.accesscontrolmaxage=86400"
-        - "traefik.http.routers.fsm-api.middlewares=fsm-cors"
+        # Security headers middleware
+        - "traefik.http.middlewares.fsm-security-headers.headers.stsSeconds=31536000"
+        - "traefik.http.middlewares.fsm-security-headers.headers.stsIncludeSubdomains=true"
+        - "traefik.http.middlewares.fsm-security-headers.headers.frameDeny=true"
+        - "traefik.http.middlewares.fsm-security-headers.headers.contentTypeNosniff=true"
+        - "traefik.http.middlewares.fsm-security-headers.headers.browserXssFilter=true"
+        # Rate limit middleware
+        - "traefik.http.middlewares.fsm-ratelimit.ratelimit.average=100"
+        - "traefik.http.middlewares.fsm-ratelimit.ratelimit.burst=50"
+        - "traefik.http.middlewares.fsm-ratelimit.ratelimit.period=1s"
+        - "traefik.http.routers.fsm-api.middlewares=fsm-cors,fsm-security-headers,fsm-ratelimit"
+      resources:
+        limits:
+          memory: 512M
       restart_policy:
-        condition: on-failure
+        condition: any
         delay: 5s
-        max_attempts: 3
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost/wp-json/"]
       interval: 30s
@@ -206,12 +257,65 @@ services:
         - "traefik.http.routers.fsm-frontend.tls=true"
         - "traefik.http.routers.fsm-frontend.tls.certresolver=letsencrypt"
         - "traefik.http.services.fsm-frontend.loadbalancer.server.port=80"
+        - "traefik.http.routers.fsm-frontend.middlewares=fsm-security-headers"
         # HTTP to HTTPS redirect
         - "traefik.http.routers.fsm-frontend-http.rule=Host(`fsm.steinmetz.ltd`)"
         - "traefik.http.routers.fsm-frontend-http.entrypoints=web"
         - "traefik.http.routers.fsm-frontend-http.middlewares=fsm-redirect-https"
+      resources:
+        limits:
+          memory: 128M
       restart_policy:
-        condition: on-failure
+        condition: any
+        delay: 5s
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost/"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  # ---------------------------------------------------------------------------
+  # Tracker Frontend (Personal GPS Tracker)
+  # ---------------------------------------------------------------------------
+  tracker-frontend:
+    build:
+      context: ./tracker/frontend
+      dockerfile: Dockerfile
+      args:
+        VITE_API_URL: https://fsm-api.steinmetz.ltd/wp-json
+    image: tracker-frontend:latest
+    depends_on:
+      - wordpress
+    networks:
+      - traefik-public
+    deploy:
+      mode: replicated
+      replicas: 1
+      placement:
+        constraints:
+          - node.role == manager
+      labels:
+        - "io.portainer.stack=fsm"
+        # Traefik configuration
+        - "traefik.enable=true"
+        - "traefik.docker.network=traefik-public"
+        # HTTPS Router
+        - "traefik.http.routers.tracker-frontend.rule=Host(`tracker.steinmetz.ltd`)"
+        - "traefik.http.routers.tracker-frontend.entrypoints=websecure"
+        - "traefik.http.routers.tracker-frontend.tls=true"
+        - "traefik.http.routers.tracker-frontend.tls.certresolver=letsencrypt"
+        - "traefik.http.services.tracker-frontend.loadbalancer.server.port=80"
+        - "traefik.http.routers.tracker-frontend.middlewares=fsm-security-headers"
+        # HTTP to HTTPS redirect
+        - "traefik.http.routers.tracker-frontend-http.rule=Host(`tracker.steinmetz.ltd`)"
+        - "traefik.http.routers.tracker-frontend-http.entrypoints=web"
+        - "traefik.http.routers.tracker-frontend-http.middlewares=fsm-redirect-https"
+      resources:
+        limits:
+          memory: 128M
+      restart_policy:
+        condition: any
+        delay: 5s
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost/"]
       interval: 30s
@@ -228,6 +332,8 @@ networks:
   traefik-public:
     external: true
   # Connect to existing Mumble network for PTT integration
+  # 2026-07-02: mumble network was rebuilt from scratch after a stale-VXLAN corruption
+  # took both mumble and this service down; reconnected now that it's healthy again.
   mumble_mumble-internal:
     external: true
 
@@ -248,6 +354,8 @@ volumes:
 # echo "your_db_password" | docker secret create fsm_db_password -
 # echo "your_jwt_secret" | docker secret create fsm_jwt_secret -
 # echo "your_github_token" | docker secret create fsm_github_token -
+# echo "your_mumble_api_key" | docker secret create fsm_mumble_api_key -
+# openssl rand -base64 32 | docker secret create fsm_redis_password -
 # =============================================================================
 secrets:
   db_root_password:
@@ -262,3 +370,12 @@ secrets:
   github_token:
     external: true
     name: fsm_github_token
+  fsm_mumble_api_key:
+    external: true
+    name: fsm_mumble_api_key
+  redis_password:
+    external: true
+    name: fsm_redis_password
+  smtp_password:
+    external: true
+    name: fsm_smtp_password

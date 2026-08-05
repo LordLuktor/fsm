@@ -37,3 +37,12 @@
     @apply inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium;
   }
 }
+
+/* Print styles for invoice */
+@media print {
+  body { background: white !important; }
+  .print\:hidden { display: none !important; }
+  .print\:p-8 { padding: 2rem !important; }
+  nav, [role="navigation"], header, footer, .sidebar,
+  [data-sidebar], button:not([data-print]) { display: none !important; }
+}

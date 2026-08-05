@@ -134,7 +134,7 @@ class FSM_Dispatch_REST_API {
                 }
                 if (current_user_can('fsm_view_own_work_orders')) {
                     $tech = FSM_Utilities::get_technician_by_user_id(get_current_user_id());
-                    return $tech && $tech->ID == $request->get_param('technician_id');
+                    return $tech && (int) $tech->ID === (int) $request->get_param('technician_id');
                 }
                 return false;
             },
@@ -203,7 +203,7 @@ class FSM_Dispatch_REST_API {
                     'reference' => get_post_meta($wo->ID, '_fsm_wo_reference', true),
                     'title' => $wo->post_title,
                     'status' => get_post_meta($wo->ID, '_fsm_wo_status', true),
-                    'priority' => get_post_meta($wo->ID, '_fsm_wo_priority', true),
+                    'priority' => get_post_meta($wo->ID, '_fsm_wo_priority', true) ?: 'normal',
                     'time_start' => get_post_meta($wo->ID, '_fsm_wo_scheduled_time_start', true),
                     'time_end' => get_post_meta($wo->ID, '_fsm_wo_scheduled_time_end', true),
                     'duration' => get_post_meta($wo->ID, '_fsm_wo_estimated_duration', true) ?: 60,
@@ -212,6 +212,7 @@ class FSM_Dispatch_REST_API {
                         'street' => get_post_meta($wo->ID, '_fsm_wo_address_street', true),
                         'city' => get_post_meta($wo->ID, '_fsm_wo_address_city', true),
                     ],
+                    'types' => FSM_Work_Order_REST_API::prepare_types($wo->ID),
                 ];
             }
 
@@ -283,6 +284,11 @@ class FSM_Dispatch_REST_API {
             return FSM_REST_API::error('not_found', __('Work order not found.', 'fsm-dispatch'), 404);
         }
 
+        $access = FSM_Organizations::verify_post_access($work_order_id);
+        if (is_wp_error($access)) {
+            return $access;
+        }
+
         // Validate technicians exist
         foreach ($technician_ids as $tech_id) {
             $tech = get_post($tech_id);
@@ -338,6 +344,11 @@ class FSM_Dispatch_REST_API {
             return FSM_REST_API::error('not_found', __('Work order not found.', 'fsm-dispatch'), 404);
         }
 
+        $access = FSM_Organizations::verify_post_access($work_order_id);
+        if (is_wp_error($access)) {
+            return $access;
+        }
+
         $assigned = get_post_meta($work_order_id, '_fsm_wo_assigned_technicians', true);
         if (!is_array($assigned)) {
             $assigned = [];
@@ -389,6 +400,11 @@ class FSM_Dispatch_REST_API {
         $work_order = get_post($work_order_id);
         if (!$work_order || $work_order->post_type !== 'fsm_work_order') {
             return FSM_REST_API::error('not_found', __('Work order not found.', 'fsm-dispatch'), 404);
+        }
+
+        $access = FSM_Organizations::verify_post_access($work_order_id);
+        if (is_wp_error($access)) {
+            return $access;
         }
 
         $old_date = get_post_meta($work_order_id, '_fsm_wo_scheduled_date', true);
@@ -457,6 +473,7 @@ class FSM_Dispatch_REST_API {
      * Get unscheduled work orders.
      */
     public static function get_unscheduled($request) {
+        // Get work orders that are either unscheduled OR unassigned (new status)
         $work_orders = get_posts([
             'post_type' => 'fsm_work_order',
             'posts_per_page' => -1,
@@ -464,7 +481,13 @@ class FSM_Dispatch_REST_API {
             'meta_query' => [
                 'relation' => 'AND',
                 [
+                    'key' => '_fsm_wo_status',
+                    'value' => ['new', 'assigned'],
+                    'compare' => 'IN',
+                ],
+                [
                     'relation' => 'OR',
+                    // No scheduled date
                     [
                         'key' => '_fsm_wo_scheduled_date',
                         'compare' => 'NOT EXISTS',
@@ -473,11 +496,11 @@ class FSM_Dispatch_REST_API {
                         'key' => '_fsm_wo_scheduled_date',
                         'value' => '',
                     ],
-                ],
-                [
-                    'key' => '_fsm_wo_status',
-                    'value' => ['new', 'assigned'],
-                    'compare' => 'IN',
+                    // Has date but status is still 'new' (unassigned)
+                    [
+                        'key' => '_fsm_wo_status',
+                        'value' => 'new',
+                    ],
                 ],
             ],
             'orderby' => 'date',
@@ -491,10 +514,11 @@ class FSM_Dispatch_REST_API {
                 'reference' => get_post_meta($wo->ID, '_fsm_wo_reference', true),
                 'title' => $wo->post_title,
                 'status' => get_post_meta($wo->ID, '_fsm_wo_status', true),
-                'priority' => get_post_meta($wo->ID, '_fsm_wo_priority', true),
+                'priority' => get_post_meta($wo->ID, '_fsm_wo_priority', true) ?: 'normal',
                 'estimated_duration' => get_post_meta($wo->ID, '_fsm_wo_estimated_duration', true) ?: 60,
                 'customer_name' => get_post_meta($wo->ID, '_fsm_wo_customer_name', true),
                 'created_at' => $wo->post_date,
+                'types' => FSM_Work_Order_REST_API::prepare_types($wo->ID),
             ];
         }
 

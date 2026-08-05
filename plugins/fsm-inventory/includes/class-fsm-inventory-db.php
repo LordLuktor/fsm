@@ -28,12 +28,14 @@ class FSM_Inventory_DB {
         // Inventory items table
         $sql_items = "CREATE TABLE $items_table (
             id bigint(20) unsigned NOT NULL AUTO_INCREMENT,
+            organization_id bigint(20) unsigned NOT NULL DEFAULT 0,
             sku varchar(100) NOT NULL,
             name varchar(255) NOT NULL,
             description text,
             category varchar(100),
             unit varchar(50) DEFAULT 'each',
             unit_cost decimal(10,2) DEFAULT 0.00,
+            retail_price decimal(10,2) DEFAULT NULL,
             reorder_point int(11) DEFAULT 0,
             location_type enum('warehouse', 'technician', 'vehicle') DEFAULT 'warehouse',
             location_id bigint(20) unsigned DEFAULT 0,
@@ -43,7 +45,8 @@ class FSM_Inventory_DB {
             created_at datetime DEFAULT CURRENT_TIMESTAMP,
             updated_at datetime DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
             PRIMARY KEY (id),
-            UNIQUE KEY sku_location (sku, location_type, location_id),
+            UNIQUE KEY org_sku_location (organization_id, sku, location_type, location_id),
+            KEY organization_id (organization_id),
             KEY location_type (location_type),
             KEY location_id (location_id),
             KEY status (status),
@@ -53,6 +56,7 @@ class FSM_Inventory_DB {
         // Inventory transaction log table
         $sql_log = "CREATE TABLE $log_table (
             id bigint(20) unsigned NOT NULL AUTO_INCREMENT,
+            organization_id bigint(20) unsigned NOT NULL DEFAULT 0,
             inventory_item_id bigint(20) unsigned NOT NULL,
             transaction_type enum('receive', 'consume', 'transfer', 'adjust', 'return') NOT NULL,
             quantity int(11) NOT NULL,
@@ -68,6 +72,7 @@ class FSM_Inventory_DB {
             user_id bigint(20) unsigned NOT NULL,
             created_at datetime DEFAULT CURRENT_TIMESTAMP,
             PRIMARY KEY (id),
+            KEY organization_id (organization_id),
             KEY inventory_item_id (inventory_item_id),
             KEY work_order_id (work_order_id),
             KEY technician_id (technician_id),
@@ -323,6 +328,7 @@ class FSM_Inventory_DB {
             'inventory_item_id' => 0,
             'work_order_id' => 0,
             'technician_id' => 0,
+            'organization_id' => 0,
             'type' => '',
             'date_from' => '',
             'date_to' => '',
@@ -334,6 +340,11 @@ class FSM_Inventory_DB {
 
         $where = "WHERE 1=1";
         $params = [];
+
+        if ($args['organization_id']) {
+            $where .= " AND organization_id = %d";
+            $params[] = $args['organization_id'];
+        }
 
         if ($args['inventory_item_id']) {
             $where .= " AND inventory_item_id = %d";

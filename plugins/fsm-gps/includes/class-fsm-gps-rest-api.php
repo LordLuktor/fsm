@@ -76,12 +76,21 @@ class FSM_GPS_REST_API {
             ],
         ]);
 
-        // Get all technician locations (for dispatchers)
+        // Get all technician locations (for dispatchers/admins)
         register_rest_route(self::NAMESPACE, '/gps/all', [
             'methods' => WP_REST_Server::READABLE,
             'callback' => [__CLASS__, 'get_all_locations'],
             'permission_callback' => function() {
                 return current_user_can('fsm_view_all_locations');
+            },
+        ]);
+
+        // Get group technician locations (for lead technicians)
+        register_rest_route(self::NAMESPACE, '/gps/group', [
+            'methods' => WP_REST_Server::READABLE,
+            'callback' => [__CLASS__, 'get_group_locations'],
+            'permission_callback' => function() {
+                return current_user_can('fsm_view_group_locations') || current_user_can('fsm_view_all_locations');
             },
         ]);
 
@@ -97,7 +106,7 @@ class FSM_GPS_REST_API {
                 // Technicians can view their own
                 if (current_user_can('fsm_update_location')) {
                     $tech = FSM_Utilities::get_technician_by_user_id(get_current_user_id());
-                    return $tech && $tech->ID == $request->get_param('technician_id');
+                    return $tech && (int) $tech->ID === (int) $request->get_param('technician_id');
                 }
                 return false;
             },
@@ -153,6 +162,26 @@ class FSM_GPS_REST_API {
                 'longitude' => [
                     'required' => true,
                     'type' => 'number',
+                ],
+            ],
+        ]);
+
+        // Nearby technicians (for technicians to find help)
+        register_rest_route(self::NAMESPACE, '/gps/nearby', [
+            'methods' => WP_REST_Server::READABLE,
+            'callback' => [__CLASS__, 'get_nearby_technicians'],
+            'permission_callback' => function() {
+                return current_user_can('fsm_access');
+            },
+            'args' => [
+                'limit' => [
+                    'default' => 5,
+                    'sanitize_callback' => 'absint',
+                ],
+                'radius' => [
+                    'default' => 25,
+                    'type' => 'number',
+                    'description' => 'Radius in miles',
                 ],
             ],
         ]);
@@ -223,14 +252,131 @@ class FSM_GPS_REST_API {
                 continue;
             }
 
-            $result[] = [
+            $user_id = get_post_meta($tech->ID, '_fsm_user_id', true);
+
+            $entry = [
                 'technician' => [
-                    'id' => $tech->ID,
-                    'name' => $tech->post_title,
-                    'status' => get_post_meta($tech->ID, '_fsm_status', true),
+                    'id'     => $tech->ID,
+                    'name'   => $tech->post_title,
+                    'status' => get_post_meta($tech->ID, '_fsm_tech_status', true)
+                                ?: get_post_meta($tech->ID, '_fsm_status', true),
+                    'phone'  => $user_id ? get_user_meta($user_id, 'phone', true) : '',
+                    'email'  => $user_id ? get_userdata($user_id)->user_email : '',
                 ],
                 'location' => self::prepare_location($location),
             ];
+
+            // Include work order summary for dispatchers/admins
+            $wo_id = $location->work_order_id ? (int) $location->work_order_id : null;
+            $entry['current_work_order'] = self::prepare_work_order_summary($wo_id);
+
+            // Include schedule adherence status
+            if (class_exists('FSM_Schedule')) {
+                $entry['schedule_status'] = FSM_Schedule::calculate_schedule_status($tech->ID);
+            }
+
+            $result[] = $entry;
+        }
+
+        return rest_ensure_response($result);
+    }
+
+    /**
+     * Get group technician locations (for lead technicians).
+     *
+     * Returns full location data for technicians in the same group/team
+     * as the requesting lead technician.
+     */
+    public static function get_group_locations($request) {
+        $current_user_id = get_current_user_id();
+        $my_tech = FSM_Utilities::get_technician_by_user_id($current_user_id);
+
+        // If user has full view access, delegate to get_all_locations
+        if (current_user_can('fsm_view_all_locations')) {
+            return self::get_all_locations($request);
+        }
+
+        if (!$my_tech) {
+            return new WP_Error('not_technician', 'User is not a technician.', ['status' => 403]);
+        }
+
+        // Get all technicians in the same team/group
+        $org_id = FSM_Organizations::get_current_context();
+        $my_teams = wp_get_object_terms($my_tech->ID, 'fsm_team', ['fields' => 'ids']);
+
+        // Get all technicians that share any team with this lead
+        $group_tech_ids = [$my_tech->ID]; // Include self
+
+        if (!empty($my_teams) && !is_wp_error($my_teams)) {
+            $team_techs = get_posts([
+                'post_type'      => 'fsm_technician',
+                'posts_per_page' => 50,
+                'post_status'    => 'publish',
+                'tax_query'      => [
+                    [
+                        'taxonomy' => 'fsm_team',
+                        'terms'    => $my_teams,
+                        'operator' => 'IN',
+                    ],
+                ],
+                'fields' => 'ids',
+            ]);
+            if (!empty($team_techs)) {
+                $group_tech_ids = array_unique(array_merge($group_tech_ids, $team_techs));
+            }
+        }
+
+        // If no team taxonomy exists, fall back to all technicians in the same org
+        if (count($group_tech_ids) <= 1 && $org_id) {
+            $org_techs = get_posts([
+                'post_type'      => 'fsm_technician',
+                'posts_per_page' => 50,
+                'post_status'    => 'publish',
+                'meta_query'     => [
+                    ['key' => '_fsm_organization_id', 'value' => $org_id],
+                ],
+                'fields' => 'ids',
+            ]);
+            if (!empty($org_techs)) {
+                $group_tech_ids = $org_techs;
+            }
+        }
+
+        // Get locations for group members
+        $locations = FSM_GPS_DB::get_all_latest($org_id);
+        $result = [];
+
+        foreach ($locations as $location) {
+            if (!in_array((int)$location->technician_id, $group_tech_ids, true)) {
+                continue;
+            }
+
+            $tech = get_post($location->technician_id);
+            if (!$tech) continue;
+
+            $user_id = get_post_meta($tech->ID, '_fsm_user_id', true);
+
+            $entry = [
+                'technician' => [
+                    'id'     => $tech->ID,
+                    'name'   => $tech->post_title,
+                    'status' => get_post_meta($tech->ID, '_fsm_tech_status', true),
+                    'phone'  => $user_id ? get_user_meta($user_id, 'phone', true) : '',
+                    'email'  => $user_id ? get_userdata($user_id)->user_email : '',
+                ],
+                'location' => self::prepare_location($location),
+            ];
+
+            // Include work order summary for lead technicians
+            $wo_id = $location->work_order_id ? (int) $location->work_order_id : null;
+            $entry['current_work_order'] = self::prepare_work_order_summary($wo_id);
+
+            // Include schedule adherence status
+            if (class_exists('FSM_Schedule')) {
+                $entry['schedule_status'] = FSM_Schedule::calculate_schedule_status($tech->ID);
+            }
+
+            $result[] = $entry;
         }
 
         return rest_ensure_response($result);
@@ -279,6 +425,11 @@ class FSM_GPS_REST_API {
         $work_order = get_post($work_order_id);
         if (!$work_order || $work_order->post_type !== 'fsm_work_order') {
             return FSM_REST_API::error('not_found', __('Work order not found.', 'fsm-gps'), 404);
+        }
+
+        $access = FSM_Organizations::verify_post_access($work_order_id);
+        if (is_wp_error($access)) {
+            return $access;
         }
 
         $locations = FSM_GPS_DB::get_for_work_order($work_order_id);
@@ -347,6 +498,112 @@ class FSM_GPS_REST_API {
     }
 
     /**
+     * Get nearby technicians.
+     *
+     * Returns the closest N technicians to the requesting user's current location.
+     * For technicians: shows only name and phone (limited info).
+     * For dispatchers/admins: shows full location data.
+     */
+    public static function get_nearby_technicians($request) {
+        $current_user_id = get_current_user_id();
+        $my_tech = FSM_Utilities::get_technician_by_user_id($current_user_id);
+        $is_dispatcher = current_user_can('fsm_view_all_locations');
+        $limit = min( absint( $request->get_param('limit') ) ?: 5, 20 );
+        $radius = (float) ( $request->get_param('radius') ?: 25 );
+
+        // Get my current location
+        $my_location = null;
+        if ( $my_tech ) {
+            $my_location = FSM_GPS_DB::get_latest( $my_tech->ID );
+        }
+
+        if ( ! $my_location ) {
+            return new WP_Error( 'no_location', 'Your location is not available. Update your location first.', array( 'status' => 400 ) );
+        }
+
+        $my_lat = (float) $my_location->latitude;
+        $my_lng = (float) $my_location->longitude;
+
+        // Get all technician locations in the org
+        $org_id = FSM_Organizations::get_current_context();
+        $all_locations = FSM_GPS_DB::get_all_latest( $org_id );
+
+        $nearby = array();
+
+        foreach ( $all_locations as $loc ) {
+            // Skip self
+            if ( $my_tech && (int) $loc->technician_id === (int) $my_tech->ID ) {
+                continue;
+            }
+
+            $distance = FSM_Utilities::calculate_distance(
+                $my_lat, $my_lng,
+                (float) $loc->latitude, (float) $loc->longitude,
+                'miles'
+            );
+
+            if ( $distance > $radius ) {
+                continue;
+            }
+
+            $tech_post = get_post( $loc->technician_id );
+            if ( ! $tech_post ) {
+                continue;
+            }
+
+            $entry = array(
+                'technician_id' => (int) $loc->technician_id,
+                'name'          => sanitize_text_field( $tech_post->post_title ),
+                'distance_miles' => round( $distance, 1 ),
+                'latitude'      => (float) $loc->latitude,
+                'longitude'     => (float) $loc->longitude,
+            );
+
+            // Technicians get limited info (name, phone, status, last update)
+            if ( ! $is_dispatcher ) {
+                $user_id = get_post_meta( $loc->technician_id, '_fsm_user_id', true );
+                $entry['phone']       = $user_id ? get_user_meta( $user_id, 'phone', true ) : '';
+                $entry['status']      = get_post_meta( $loc->technician_id, '_fsm_tech_status', true );
+                $entry['recorded_at'] = $loc->recorded_at;
+                // Remove precise coords for technicians — just give distance + approximate pin
+                // Round to ~0.01 degree (~0.7 miles) to preserve privacy
+                $entry['latitude']  = round( (float) $loc->latitude, 2 );
+                $entry['longitude'] = round( (float) $loc->longitude, 2 );
+            } else {
+                // Dispatchers get full data
+                $entry['accuracy']    = $loc->accuracy ? (float) $loc->accuracy : null;
+                $entry['speed']       = $loc->speed ? (float) $loc->speed : null;
+                $entry['heading']     = $loc->heading ? (float) $loc->heading : null;
+                $entry['recorded_at'] = $loc->recorded_at;
+                $entry['status']      = get_post_meta( $loc->technician_id, '_fsm_tech_status', true );
+                $user_id = get_post_meta( $loc->technician_id, '_fsm_user_id', true );
+                $entry['phone'] = $user_id ? get_user_meta( $user_id, 'phone', true ) : '';
+                $entry['email'] = $user_id ? get_userdata( $user_id )->user_email : '';
+            }
+
+            $nearby[] = $entry;
+        }
+
+        // Sort by distance
+        usort( $nearby, function( $a, $b ) {
+            return $a['distance_miles'] <=> $b['distance_miles'];
+        } );
+
+        // Limit results
+        $nearby = array_slice( $nearby, 0, $limit );
+
+        return rest_ensure_response( array(
+            'my_location' => array(
+                'latitude'  => $my_lat,
+                'longitude' => $my_lng,
+            ),
+            'nearby'      => $nearby,
+            'count'       => count( $nearby ),
+            'radius_miles' => $radius,
+        ) );
+    }
+
+    /**
      * Prepare location for response.
      */
     private static function prepare_location($location) {
@@ -362,6 +619,59 @@ class FSM_GPS_REST_API {
             'work_order_id' => $location->work_order_id ? (int) $location->work_order_id : null,
             'address' => $location->address,
             'recorded_at' => $location->recorded_at,
+        ];
+    }
+
+    /**
+     * Build a lightweight work order summary for map display.
+     *
+     * @param int $work_order_id Work order post ID.
+     * @return array|null Summary array or null if invalid.
+     */
+    private static function prepare_work_order_summary($work_order_id) {
+        if (!$work_order_id) {
+            return null;
+        }
+
+        $wo = get_post($work_order_id);
+        if (!$wo || $wo->post_type !== 'fsm_work_order') {
+            return null;
+        }
+
+        $status    = get_post_meta($work_order_id, '_fsm_wo_status', true) ?: 'new';
+        $started   = get_post_meta($work_order_id, '_fsm_wo_started_at', true);
+        $reference = get_post_meta($work_order_id, '_fsm_wo_reference', true);
+
+        $status_labels = [
+            'new'         => 'New',
+            'assigned'    => 'Assigned',
+            'en_route'    => 'En Route',
+            'in_progress' => 'In Progress',
+            'on_hold'     => 'On Hold',
+            'completed'   => 'Completed',
+            'cancelled'   => 'Cancelled',
+        ];
+
+        // Get types if the WO REST API is available
+        $types = [];
+        if (class_exists('FSM_Work_Order_REST_API')) {
+            $types = FSM_Work_Order_REST_API::prepare_types($work_order_id);
+        }
+
+        return [
+            'id'            => (int) $work_order_id,
+            'title'         => sanitize_text_field($wo->post_title),
+            'reference'     => sanitize_text_field($reference),
+            'status'        => $status,
+            'status_label'  => $status_labels[$status] ?? ucfirst($status),
+            'priority'      => get_post_meta($work_order_id, '_fsm_wo_priority', true) ?: 'normal',
+            'customer_name' => sanitize_text_field(get_post_meta($work_order_id, '_fsm_wo_customer_name', true)),
+            'address'       => sanitize_text_field(implode(', ', array_filter([
+                get_post_meta($work_order_id, '_fsm_wo_address_street', true),
+                get_post_meta($work_order_id, '_fsm_wo_address_city', true),
+            ]))),
+            'started_at'    => $started ?: null,
+            'types'         => $types,
         ];
     }
 }

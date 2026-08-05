@@ -6,10 +6,10 @@ import {
   ClipboardList,
   Clock,
   CheckCircle,
-  AlertTriangle,
   TrendingUp,
 } from 'lucide-react';
 import LoadingSpinner from '../components/common/LoadingSpinner';
+import PriorityBadge from '../components/common/PriorityBadge';
 
 function DashboardPage() {
   const { user, isTechnician, isDispatcher } = useAuth();
@@ -108,7 +108,7 @@ function DashboardPage() {
               <TrendingUp className="h-6 w-6 text-orange-600" />
             </div>
             <div className="ml-4">
-              <p className="text-sm font-medium text-gray-500">In Progress</p>
+              <p className="text-sm font-medium text-gray-500">Active</p>
               <p className="text-2xl font-semibold text-gray-900">{stats.inProgress}</p>
             </div>
           </div>
@@ -150,11 +150,14 @@ function DashboardPage() {
               <Link
                 key={order.id}
                 to={`/work-orders/${order.id}`}
-                className="block px-6 py-4 hover:bg-gray-50 transition-colors"
+                className={`block px-6 py-4 hover:bg-gray-50 transition-colors ${
+                  order.priority === 'urgent' ? 'border-l-4 border-l-red-500 bg-red-50/30' :
+                  order.priority === 'high' ? 'border-l-4 border-l-orange-400' : ''
+                }`}
               >
                 <div className="flex items-center justify-between">
                   <div className="flex-1 min-w-0">
-                    <div className="flex items-center gap-3">
+                    <div className="flex items-center gap-2 flex-wrap">
                       <span className="text-sm font-mono text-gray-500">
                         {order.reference}
                       </span>
@@ -165,9 +168,20 @@ function DashboardPage() {
                       >
                         {order.status_label}
                       </span>
-                      {order.priority === 'urgent' && (
-                        <AlertTriangle className="h-4 w-4 text-red-500" />
-                      )}
+                      <PriorityBadge priority={order.priority} size="xs" />
+                      {order.types?.length > 0 && order.types.map((t) => (
+                        <span
+                          key={t.id}
+                          className="text-[10px] px-1.5 py-0.5 rounded font-medium border"
+                          style={{
+                            backgroundColor: `${t.color}15`,
+                            color: t.color,
+                            borderColor: `${t.color}40`,
+                          }}
+                        >
+                          {t.name}
+                        </span>
+                      ))}
                     </div>
                     <p className="mt-1 text-sm font-medium text-gray-900 truncate">
                       {order.title}
