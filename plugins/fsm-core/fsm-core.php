@@ -102,6 +102,7 @@ final class FSM_Core {
         require_once FSM_CORE_DIR . 'includes/class-fsm-domain-mapping.php';
         require_once FSM_CORE_DIR . 'includes/class-fsm-team-api.php';
         require_once FSM_CORE_DIR . 'includes/class-fsm-utilities.php';
+        require_once FSM_CORE_DIR . 'includes/class-fsm-crypto.php';
         require_once FSM_CORE_DIR . 'includes/class-fsm-organizations.php';
         require_once FSM_CORE_DIR . 'includes/class-fsm-demo-data.php';
 

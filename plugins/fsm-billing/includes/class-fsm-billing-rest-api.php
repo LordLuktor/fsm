@@ -97,6 +97,31 @@ class FSM_Billing_REST_API {
                 return current_user_can('fsm_manage_billing');
             },
         ]);
+
+        register_rest_route(self::NAMESPACE, '/invoices/(?P<id>\d+)/pay-link', [
+            'methods' => WP_REST_Server::CREATABLE,
+            'callback' => [__CLASS__, 'create_pay_link'],
+            'permission_callback' => function() {
+                return current_user_can('fsm_manage_billing');
+            },
+        ]);
+
+        // Public webhook routes — unauthenticated by design (Stripe/PayPal call
+        // these directly with no WP session), so every request is verified
+        // inside the gateway's handle_webhook() against that org's stored
+        // signing secret before anything is trusted. org_id in the URL lets us
+        // look up the right org's secret without needing a WP-authenticated caller.
+        register_rest_route(self::NAMESPACE, '/webhooks/stripe/(?P<org_id>\d+)', [
+            'methods' => WP_REST_Server::CREATABLE,
+            'callback' => [__CLASS__, 'stripe_webhook'],
+            'permission_callback' => '__return_true',
+        ]);
+
+        register_rest_route(self::NAMESPACE, '/webhooks/paypal/(?P<org_id>\d+)', [
+            'methods' => WP_REST_Server::CREATABLE,
+            'callback' => [__CLASS__, 'paypal_webhook'],
+            'permission_callback' => '__return_true',
+        ]);
     }
 
     /**
@@ -407,6 +432,57 @@ class FSM_Billing_REST_API {
     }
 
     /**
+     * Generate an online payment link for an invoice via the org's default
+     * (or explicitly requested) configured processor.
+     */
+    public static function create_pay_link($request) {
+        $invoice = FSM_Billing_DB::get_invoice((int) $request->get_param('id'));
+        if (!$invoice) {
+            return FSM_REST_API::error('not_found', __('Invoice not found.', 'fsm-billing'), 404);
+        }
+
+        $access = self::verify_access($invoice);
+        if (is_wp_error($access)) {
+            return $access;
+        }
+
+        if (in_array($invoice->status, ['paid', 'void', 'draft'], true)) {
+            return FSM_REST_API::error('invalid_status', __('Invoice must be sent before generating a payment link.', 'fsm-billing'), 400);
+        }
+
+        $settings = FSM_Billing_Payment_Settings::get($invoice->organization_id);
+        $processor = $request->get_param('processor') ?: $settings['default_processor'];
+
+        if ($processor === 'stripe') {
+            $url = FSM_Billing_Stripe_Gateway::create_pay_link($invoice);
+        } elseif ($processor === 'paypal') {
+            $url = FSM_Billing_Paypal_Gateway::create_pay_link($invoice);
+        } else {
+            return FSM_REST_API::error('no_processor', __('No payment processor is configured for this organization.', 'fsm-billing'), 400);
+        }
+
+        if (is_wp_error($url)) {
+            return $url;
+        }
+
+        return rest_ensure_response(['url' => $url, 'processor' => $processor]);
+    }
+
+    /**
+     * Stripe webhook receiver.
+     */
+    public static function stripe_webhook($request) {
+        return FSM_Billing_Stripe_Gateway::handle_webhook($request, (int) $request->get_param('org_id'));
+    }
+
+    /**
+     * PayPal webhook receiver.
+     */
+    public static function paypal_webhook($request) {
+        return FSM_Billing_Paypal_Gateway::handle_webhook($request, (int) $request->get_param('org_id'));
+    }
+
+    /**
      * Prepare an invoice for API response.
      *
      * @param object $invoice  Invoice row.
@@ -455,6 +531,7 @@ class FSM_Billing_REST_API {
                     'amount' => (float) $payment->amount,
                     'method' => $payment->method,
                     'reference' => $payment->reference,
+                    'processor' => $payment->processor,
                     'paid_at' => $payment->paid_at,
                 ];
             }, FSM_Billing_DB::get_payments($invoice->id));

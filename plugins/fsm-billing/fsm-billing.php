@@ -54,7 +54,7 @@ final class FSM_Billing {
      *
      * @var string
      */
-    const DB_VERSION = '1.0.0';
+    const DB_VERSION = '1.2.0';
 
     /**
      * Get plugin instance.
@@ -81,7 +81,10 @@ final class FSM_Billing {
      */
     private function includes() {
         require_once FSM_BILLING_DIR . 'includes/class-fsm-billing-db.php';
+        require_once FSM_BILLING_DIR . 'includes/class-fsm-billing-payment-settings.php';
         require_once FSM_BILLING_DIR . 'includes/class-fsm-billing-generator.php';
+        require_once FSM_BILLING_DIR . 'includes/class-fsm-billing-stripe-gateway.php';
+        require_once FSM_BILLING_DIR . 'includes/class-fsm-billing-paypal-gateway.php';
         require_once FSM_BILLING_DIR . 'includes/class-fsm-billing-rest-api.php';
 
         if (is_admin()) {
@@ -99,6 +102,8 @@ final class FSM_Billing {
         // by a version check so it's a no-op after the first successful run
         // (same pattern mu-fsm-loader.php already uses for tracker's tables).
         add_action('init', [__CLASS__, 'maybe_create_tables'], 5);
+        // Priority 15: after FSM_Organizations::register_post_type() (priority 5) registers fsm_organization.
+        add_action('init', [FSM_Billing_Payment_Settings::class, 'register_meta'], 15);
 
         add_action('fsm_work_order_status_changed', [FSM_Billing_Generator::class, 'on_work_order_completed'], 10, 3);
         add_action('rest_api_init', [FSM_Billing_REST_API::class, 'register_routes']);
@@ -108,6 +113,8 @@ final class FSM_Billing {
             add_action('admin_post_fsm_billing_save_invoice', [FSM_Billing_Admin::class, 'handle_save']);
             add_action('admin_post_fsm_billing_record_payment', [FSM_Billing_Admin::class, 'handle_record_payment']);
             add_action('admin_post_fsm_billing_set_status', [FSM_Billing_Admin::class, 'handle_set_status']);
+            add_action('admin_post_fsm_billing_send_pay_link', [FSM_Billing_Admin::class, 'handle_send_pay_link']);
+            add_action('admin_post_fsm_billing_save_payment_settings', [FSM_Billing_Admin::class, 'handle_save_payment_settings']);
         }
     }
 

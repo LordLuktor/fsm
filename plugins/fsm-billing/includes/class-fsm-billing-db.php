@@ -38,6 +38,7 @@ class FSM_Billing_DB {
             organization_id bigint(20) unsigned NOT NULL DEFAULT 0,
             work_order_id bigint(20) unsigned DEFAULT NULL,
             invoice_number varchar(50) DEFAULT NULL,
+            paypal_invoice_id varchar(191) DEFAULT NULL,
             customer_name varchar(255) DEFAULT '',
             customer_email varchar(255) DEFAULT '',
             status varchar(20) NOT NULL DEFAULT 'draft',
@@ -58,7 +59,8 @@ class FSM_Billing_DB {
             UNIQUE KEY invoice_number (invoice_number),
             KEY organization_id (organization_id),
             KEY work_order_id (work_order_id),
-            KEY status (status)
+            KEY status (status),
+            KEY paypal_invoice_id (paypal_invoice_id)
         ) $charset_collate;";
 
         $sql_line_items = "CREATE TABLE $line_items_table (
@@ -87,12 +89,17 @@ class FSM_Billing_DB {
             method enum('cash','check','card','bank_transfer','other') NOT NULL DEFAULT 'other',
             reference varchar(255) DEFAULT '',
             notes text,
+            processor varchar(20) DEFAULT NULL,
+            processor_payment_id varchar(191) DEFAULT NULL,
+            idempotency_key varchar(191) DEFAULT NULL,
             recorded_by bigint(20) unsigned DEFAULT NULL,
             paid_at datetime DEFAULT CURRENT_TIMESTAMP,
             created_at datetime DEFAULT CURRENT_TIMESTAMP,
             PRIMARY KEY (id),
+            UNIQUE KEY idempotency_key (idempotency_key),
             KEY invoice_id (invoice_id),
-            KEY organization_id (organization_id)
+            KEY organization_id (organization_id),
+            KEY processor_payment_id (processor_payment_id)
         ) $charset_collate;";
 
         require_once ABSPATH . 'wp-admin/includes/upgrade.php';
@@ -152,6 +159,22 @@ class FSM_Billing_DB {
         return $wpdb->get_row($wpdb->prepare(
             "SELECT * FROM $table WHERE work_order_id = %d ORDER BY id DESC LIMIT 1",
             $work_order_id
+        ));
+    }
+
+    /**
+     * Get an invoice by its PayPal invoice ID (set when a PayPal pay link is generated).
+     *
+     * @param string $paypal_invoice_id PayPal invoice ID.
+     * @return object|null
+     */
+    public static function get_invoice_by_paypal_id($paypal_invoice_id) {
+        global $wpdb;
+        $table = FSM_Billing::get_invoices_table();
+
+        return $wpdb->get_row($wpdb->prepare(
+            "SELECT * FROM $table WHERE paypal_invoice_id = %s",
+            $paypal_invoice_id
         ));
     }
 
@@ -360,14 +383,42 @@ class FSM_Billing_DB {
     }
 
     /**
-     * Record a manual payment against an invoice and roll its status forward.
+     * Look up a payment already recorded for a given idempotency key
+     * (e.g. a Stripe/PayPal webhook event ID), so retried webhook deliveries
+     * don't double-record the same payment.
      *
-     * @param array $data Payment data (invoice_id, organization_id, amount, method, reference, notes, recorded_by, paid_at).
+     * @param string $idempotency_key Idempotency key.
+     * @return object|null
+     */
+    public static function get_payment_by_idempotency_key($idempotency_key) {
+        global $wpdb;
+        $table = FSM_Billing::get_payments_table();
+
+        return $wpdb->get_row($wpdb->prepare(
+            "SELECT * FROM $table WHERE idempotency_key = %s",
+            $idempotency_key
+        ));
+    }
+
+    /**
+     * Record a payment (manual or processor-driven) against an invoice and
+     * roll its status forward. If an idempotency_key is provided and already
+     * recorded, this is a no-op that returns the existing payment's ID.
+     *
+     * @param array $data Payment data (invoice_id, organization_id, amount, method, reference, notes,
+     *                    processor, processor_payment_id, idempotency_key, recorded_by, paid_at).
      * @return int|false Payment ID or false on failure.
      */
     public static function record_payment($data) {
         global $wpdb;
         $table = FSM_Billing::get_payments_table();
+
+        if (!empty($data['idempotency_key'])) {
+            $existing = self::get_payment_by_idempotency_key($data['idempotency_key']);
+            if ($existing) {
+                return (int) $existing->id;
+            }
+        }
 
         $result = $wpdb->insert($table, $data);
         if (!$result) {

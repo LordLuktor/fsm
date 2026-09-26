@@ -28,6 +28,133 @@ class FSM_Billing_Admin {
             'fsm-billing',
             [__CLASS__, 'render']
         );
+
+        add_submenu_page(
+            'fsm-dashboard',
+            __('Payment Settings', 'fsm-billing'),
+            __('Payment Settings', 'fsm-billing'),
+            'fsm_manage_billing',
+            'fsm-billing-payment-settings',
+            [__CLASS__, 'render_payment_settings']
+        );
+    }
+
+    /**
+     * Payment Settings page: connect this organization's own Stripe/PayPal accounts.
+     */
+    public static function render_payment_settings() {
+        if (!current_user_can('fsm_manage_billing')) {
+            wp_die(__('You do not have permission to access this page.', 'fsm-billing'));
+        }
+
+        self::render_notice();
+
+        $org_id = (int) FSM_Organizations::get_current_context();
+        if (!$org_id) {
+            echo '<div class="wrap"><h1>' . esc_html__('Payment Settings', 'fsm-billing') . '</h1>';
+            echo '<p>' . esc_html__('Select an organization to configure payment settings.', 'fsm-billing') . '</p></div>';
+            return;
+        }
+
+        $settings = FSM_Billing_Payment_Settings::get_display($org_id);
+        ?>
+        <div class="wrap">
+            <h1><?php esc_html_e('Payment Settings', 'fsm-billing'); ?></h1>
+            <p class="description">
+                <?php esc_html_e('Connect your own Stripe and/or PayPal account so customers can pay invoices online. Payments go directly to your account — nothing routes through the platform.', 'fsm-billing'); ?>
+            </p>
+
+            <form method="post" action="<?php echo esc_url(admin_url('admin-post.php')); ?>">
+                <?php wp_nonce_field('fsm_billing_save_payment_settings'); ?>
+                <input type="hidden" name="action" value="fsm_billing_save_payment_settings">
+                <input type="hidden" name="organization_id" value="<?php echo esc_attr($org_id); ?>">
+
+                <h2><?php esc_html_e('Default Processor', 'fsm-billing'); ?></h2>
+                <table class="form-table">
+                    <tr>
+                        <th scope="row"><label for="default_processor"><?php esc_html_e('Use for payment links', 'fsm-billing'); ?></label></th>
+                        <td>
+                            <select id="default_processor" name="default_processor">
+                                <option value=""><?php esc_html_e('None selected', 'fsm-billing'); ?></option>
+                                <option value="stripe" <?php selected($settings['default_processor'], 'stripe'); ?>><?php esc_html_e('Stripe', 'fsm-billing'); ?></option>
+                                <option value="paypal" <?php selected($settings['default_processor'], 'paypal'); ?>><?php esc_html_e('PayPal', 'fsm-billing'); ?></option>
+                            </select>
+                        </td>
+                    </tr>
+                </table>
+
+                <h2><?php esc_html_e('Stripe', 'fsm-billing'); ?></h2>
+                <table class="form-table">
+                    <tr>
+                        <th scope="row"><label for="stripe_mode"><?php esc_html_e('Mode', 'fsm-billing'); ?></label></th>
+                        <td>
+                            <select id="stripe_mode" name="stripe_mode">
+                                <option value="test" <?php selected($settings['stripe_mode'], 'test'); ?>><?php esc_html_e('Test', 'fsm-billing'); ?></option>
+                                <option value="live" <?php selected($settings['stripe_mode'], 'live'); ?>><?php esc_html_e('Live', 'fsm-billing'); ?></option>
+                            </select>
+                        </td>
+                    </tr>
+                    <tr>
+                        <th scope="row"><label for="stripe_publishable_key"><?php esc_html_e('Publishable Key', 'fsm-billing'); ?></label></th>
+                        <td><input type="text" id="stripe_publishable_key" name="stripe_publishable_key" class="regular-text" value="<?php echo esc_attr($settings['stripe_publishable_key']); ?>" placeholder="pk_..."></td>
+                    </tr>
+                    <tr>
+                        <th scope="row"><label for="stripe_secret_key"><?php esc_html_e('Secret Key', 'fsm-billing'); ?></label></th>
+                        <td>
+                            <input type="password" id="stripe_secret_key" name="stripe_secret_key" class="regular-text" placeholder="<?php echo $settings['stripe_secret_key_configured'] ? esc_attr__('•••••••• (configured — leave blank to keep)', 'fsm-billing') : 'sk_...'; ?>" autocomplete="off">
+                        </td>
+                    </tr>
+                    <tr>
+                        <th scope="row"><label for="stripe_webhook_secret"><?php esc_html_e('Webhook Signing Secret', 'fsm-billing'); ?></label></th>
+                        <td>
+                            <input type="password" id="stripe_webhook_secret" name="stripe_webhook_secret" class="regular-text" placeholder="<?php echo $settings['stripe_webhook_secret_configured'] ? esc_attr__('•••••••• (configured — leave blank to keep)', 'fsm-billing') : 'whsec_...'; ?>" autocomplete="off">
+                            <p class="description">
+                                <?php esc_html_e('Webhook endpoint URL to configure in Stripe:', 'fsm-billing'); ?>
+                                <code><?php echo esc_html(rest_url('fsm/v1/webhooks/stripe/' . $org_id)); ?></code>
+                            </p>
+                        </td>
+                    </tr>
+                </table>
+
+                <h2><?php esc_html_e('PayPal', 'fsm-billing'); ?></h2>
+                <table class="form-table">
+                    <tr>
+                        <th scope="row"><label for="paypal_mode"><?php esc_html_e('Mode', 'fsm-billing'); ?></label></th>
+                        <td>
+                            <select id="paypal_mode" name="paypal_mode">
+                                <option value="sandbox" <?php selected($settings['paypal_mode'], 'sandbox'); ?>><?php esc_html_e('Sandbox', 'fsm-billing'); ?></option>
+                                <option value="live" <?php selected($settings['paypal_mode'], 'live'); ?>><?php esc_html_e('Live', 'fsm-billing'); ?></option>
+                            </select>
+                        </td>
+                    </tr>
+                    <tr>
+                        <th scope="row"><label for="paypal_client_id"><?php esc_html_e('Client ID', 'fsm-billing'); ?></label></th>
+                        <td><input type="text" id="paypal_client_id" name="paypal_client_id" class="regular-text" value="<?php echo esc_attr($settings['paypal_client_id']); ?>"></td>
+                    </tr>
+                    <tr>
+                        <th scope="row"><label for="paypal_client_secret"><?php esc_html_e('Client Secret', 'fsm-billing'); ?></label></th>
+                        <td>
+                            <input type="password" id="paypal_client_secret" name="paypal_client_secret" class="regular-text" placeholder="<?php echo $settings['paypal_client_secret_configured'] ? esc_attr__('•••••••• (configured — leave blank to keep)', 'fsm-billing') : ''; ?>" autocomplete="off">
+                        </td>
+                    </tr>
+                    <tr>
+                        <th scope="row"><label for="paypal_webhook_id"><?php esc_html_e('Webhook ID', 'fsm-billing'); ?></label></th>
+                        <td>
+                            <input type="text" id="paypal_webhook_id" name="paypal_webhook_id" class="regular-text" value="<?php echo esc_attr($settings['paypal_webhook_id']); ?>">
+                            <p class="description">
+                                <?php esc_html_e('Webhook endpoint URL to configure in PayPal:', 'fsm-billing'); ?>
+                                <code><?php echo esc_html(rest_url('fsm/v1/webhooks/paypal/' . $org_id)); ?></code>
+                            </p>
+                        </td>
+                    </tr>
+                </table>
+
+                <p class="submit">
+                    <input type="submit" class="button button-primary" value="<?php esc_attr_e('Save Payment Settings', 'fsm-billing'); ?>">
+                </p>
+            </form>
+        </div>
+        <?php
     }
 
     /**
@@ -63,6 +190,7 @@ class FSM_Billing_Admin {
             'payment_recorded' => __('Payment recorded.', 'fsm-billing'),
             'sent' => __('Invoice marked as sent.', 'fsm-billing'),
             'void' => __('Invoice voided.', 'fsm-billing'),
+            'saved' => __('Payment settings saved.', 'fsm-billing'),
         ];
 
         if ($updated && isset($messages[$updated])) {
@@ -341,6 +469,22 @@ class FSM_Billing_Admin {
                 </tbody>
             </table>
 
+            <?php if ($can_manage && in_array($invoice->status, ['sent', 'partial', 'overdue'], true) && $balance_due > 0 && FSM_Billing_Payment_Settings::has_any_processor($invoice->organization_id)) : ?>
+                <h3><?php esc_html_e('Online Payment', 'fsm-billing'); ?></h3>
+                <form method="post" action="<?php echo esc_url(admin_url('admin-post.php')); ?>">
+                    <?php wp_nonce_field('fsm_billing_send_pay_link'); ?>
+                    <input type="hidden" name="action" value="fsm_billing_send_pay_link">
+                    <input type="hidden" name="invoice_id" value="<?php echo esc_attr($invoice_id); ?>">
+                    <button type="submit" class="button"><?php esc_html_e('Generate Payment Link', 'fsm-billing'); ?></button>
+                </form>
+                <?php if (!empty($_GET['pay_link'])) : ?>
+                    <p>
+                        <strong><?php esc_html_e('Payment link:', 'fsm-billing'); ?></strong>
+                        <a href="<?php echo esc_url(wp_unslash($_GET['pay_link'])); ?>" target="_blank" rel="noopener"><?php echo esc_html(wp_unslash($_GET['pay_link'])); ?></a>
+                    </p>
+                <?php endif; ?>
+            <?php endif; ?>
+
             <?php if ($can_manage && $invoice->status !== 'void' && $balance_due > 0) : ?>
                 <h3><?php esc_html_e('Record Payment', 'fsm-billing'); ?></h3>
                 <form method="post" action="<?php echo esc_url(admin_url('admin-post.php')); ?>" style="max-width: 500px;">
@@ -606,6 +750,73 @@ class FSM_Billing_Admin {
         }
 
         self::redirect_to_invoice($invoice_id);
+    }
+
+    /**
+     * admin-post handler: generate an online payment link via the org's default processor.
+     */
+    public static function handle_send_pay_link() {
+        if (!current_user_can('fsm_manage_billing')) {
+            wp_die(__('You do not have permission to do that.', 'fsm-billing'));
+        }
+        check_admin_referer('fsm_billing_send_pay_link');
+
+        $invoice_id = absint($_POST['invoice_id'] ?? 0);
+        $invoice = FSM_Billing_DB::get_invoice($invoice_id);
+        if (!$invoice || is_wp_error(FSM_Billing_DB::verify_access($invoice))) {
+            wp_die(__('Invoice not found.', 'fsm-billing'));
+        }
+
+        $settings = FSM_Billing_Payment_Settings::get($invoice->organization_id);
+        $processor = $settings['default_processor'];
+
+        if ($processor === 'stripe') {
+            $url = FSM_Billing_Stripe_Gateway::create_pay_link($invoice);
+        } elseif ($processor === 'paypal') {
+            $url = FSM_Billing_Paypal_Gateway::create_pay_link($invoice);
+        } else {
+            self::redirect_to_invoice($invoice_id, '', __('No default payment processor is configured. Set one on the Payment Settings page.', 'fsm-billing'));
+        }
+
+        if (is_wp_error($url)) {
+            self::redirect_to_invoice($invoice_id, '', $url->get_error_message());
+        }
+
+        $redirect = admin_url('admin.php?page=fsm-billing&invoice=' . $invoice_id . '&pay_link=' . rawurlencode($url));
+        wp_safe_redirect($redirect);
+        exit;
+    }
+
+    /**
+     * admin-post handler: save an organization's Stripe/PayPal payment settings.
+     */
+    public static function handle_save_payment_settings() {
+        if (!current_user_can('fsm_manage_billing')) {
+            wp_die(__('You do not have permission to do that.', 'fsm-billing'));
+        }
+        check_admin_referer('fsm_billing_save_payment_settings');
+
+        $org_id = absint($_POST['organization_id'] ?? 0);
+        $context = FSM_Organizations::get_current_context();
+        $allowed = FSM_Organizations::is_super_admin() || ((int) $context === $org_id);
+        if (!$org_id || !$allowed) {
+            wp_die(__('Invalid organization.', 'fsm-billing'));
+        }
+
+        FSM_Billing_Payment_Settings::save($org_id, [
+            'default_processor' => wp_unslash($_POST['default_processor'] ?? ''),
+            'stripe_mode' => wp_unslash($_POST['stripe_mode'] ?? 'test'),
+            'stripe_publishable_key' => wp_unslash($_POST['stripe_publishable_key'] ?? ''),
+            'stripe_secret_key' => wp_unslash($_POST['stripe_secret_key'] ?? ''),
+            'stripe_webhook_secret' => wp_unslash($_POST['stripe_webhook_secret'] ?? ''),
+            'paypal_mode' => wp_unslash($_POST['paypal_mode'] ?? 'sandbox'),
+            'paypal_client_id' => wp_unslash($_POST['paypal_client_id'] ?? ''),
+            'paypal_client_secret' => wp_unslash($_POST['paypal_client_secret'] ?? ''),
+            'paypal_webhook_id' => wp_unslash($_POST['paypal_webhook_id'] ?? ''),
+        ]);
+
+        wp_safe_redirect(admin_url('admin.php?page=fsm-billing-payment-settings&updated=saved'));
+        exit;
     }
 
     /**
