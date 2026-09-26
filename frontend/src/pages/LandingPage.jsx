@@ -561,7 +561,7 @@ export default function LandingPage() {
           </h4>
           <div className="flex flex-wrap items-center justify-center gap-x-6 gap-y-2 text-sm text-gray-500">
             <a href="https://steinmetz.ltd" className="hover:text-primary-600 transition-colors">Steinmetz Ventures</a>
-            <a href="https://pool.steinmetz.ltd" className="hover:text-primary-600 transition-colors">RackOS</a>
+            <a href="https://rackos.steinmetz.ltd" className="hover:text-primary-600 transition-colors">RackOS</a>
             <a href="https://chores.steinmetz.ltd" className="hover:text-primary-600 transition-colors">ChoreQuest</a>
             <a href="https://aac.steinmetz.ltd" className="hover:text-primary-600 transition-colors">OpenVoice</a>
             <a href="https://fundraiser.steinmetz.ltd" className="hover:text-primary-600 transition-colors">Fundraiser Pro</a>
