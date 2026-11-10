@@ -567,6 +567,7 @@ export default function LandingPage() {
             <a href="https://fundraiser.steinmetz.ltd" className="hover:text-primary-600 transition-colors">Fundraiser Pro</a>
             <a href="https://scottsteinmetz.biz" className="hover:text-primary-600 transition-colors">Scott Steinmetz — Portfolio</a>
             <a href="https://apexweb.us" className="hover:text-primary-600 transition-colors">Apex Webcrafters</a>
+            <a href="https://shawneecuesports.com" className="hover:text-primary-600 transition-colors">Shawnee Cue Sports</a>
             <a href="https://steinmetzprinting.com" className="hover:text-primary-600 transition-colors">Steinmetz Printing</a>
           </div>
         </div>
